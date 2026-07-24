@@ -4,8 +4,9 @@
 - HTTP 处理器 / 实时监听器调用 :meth:`update_session`（或兼容包装
   :meth:`update_status` / :meth:`update_context`）只更新内存中的 **活跃会话注册表**
   （``session_id -> _SessionRuntime``），不做任何增量下发；
-- 后台清扫器协程周期性地把“已完成后停留超时”或“长时间无更新”的会话从注册表移除，
-  使注册表始终等于 GET /api/v1/state 的权威快照；
+- 后台清扫器协程周期性地把“已完成后停留超时”的会话从注册表移除，
+  使注册表始终等于 GET /api/v1/state 的权威快照；活跃会话不因超时被清理，
+  其生命周期完全交由上报端的收尾事件（``idle`` / ``error``）驱动；
 - 后台全量同步协程每隔 ``sync_interval`` 秒，把当前注册表整帧下发给固件
   （``B`` -> 全量 ``S`` -> ``E``），固件据此强制刷屏，使屏幕与权威状态完全一致；
 - 后台消费者协程从队列取出命令并交给 BLE 发送回调（串行写入）。
@@ -25,9 +26,12 @@ from loguru import logger
 
 from openwaifud.models import (
     AgentStatus,
+    ChatMessage,
     ConversationContext,
     DaemonState,
+    DetailUpdate,
     GlobalEventKind,
+    SessionDetail,
     SessionInfo,
     StatusUpdate,
 )
@@ -46,6 +50,12 @@ class _SessionRuntime:
     updated_at: float = field(default_factory=time.monotonic)
     done: bool = False
     done_since: float | None = None
+    # 详情数据（由 POST /api/v1/session/detail 上报，供详情页展示）
+    metadata: dict[str, Any] = field(default_factory=dict)
+    chat_context: list[ChatMessage] = field(default_factory=list)
+    # 墙钟时间戳（UTC），用于详情页展示"开始时间""最后更新"
+    wall_started_at: datetime | None = None
+    wall_updated_at: datetime | None = None
 
     def elapsed(self, now: float | None = None) -> float:
         """返回该会话已运行的秒数。"""
@@ -60,7 +70,6 @@ class StateManager:
         queue_max_size: int = 100,
         *,
         done_linger: float = 5.0,
-        idle_timeout: float = 60.0,
         sweep_interval: float = 1.0,
         sync_interval: float = 2.0,
     ) -> None:
@@ -76,7 +85,6 @@ class StateManager:
         self._ble_callback: Callable[..., Coroutine] | None = None
 
         self._done_linger = done_linger
-        self._idle_timeout = idle_timeout
         self._sweep_interval = sweep_interval
         self._sync_interval = sync_interval
 
@@ -156,6 +164,41 @@ class StateManager:
             plugin_type=context.plugin_type,
             current_task=context.current_task,
         )
+        # 若上下文携带了 metadata，也合并到会话详情中
+        if context.metadata:
+            await self.update_session_detail(
+                DetailUpdate(
+                    session_id=context.session_id,
+                    metadata=context.metadata,
+                ),
+            )
+
+    async def update_session_detail(self, update: DetailUpdate) -> None:
+        """合并一次详情更新（元数据 / 聊天上下文 / 错误信息）。
+
+        仅更新非 None 字段。若会话尚不存在会自动创建（不设定 status，
+        默认 THINKING）。聊天上下文为**全量替换**（而非追加），便于插件
+        只发送最近若干条消息摘要。
+        """
+        now_mono = time.monotonic()
+        now_wall = datetime.now(UTC)
+        sid = update.session_id
+        rt = self._sessions.get(sid)
+        if rt is None:
+            rt = _SessionRuntime(session_id=sid, started_at=now_mono)
+            self._sessions[sid] = rt
+
+        if update.metadata is not None:
+            rt.metadata.update(update.metadata)
+        if update.chat_context is not None:
+            rt.chat_context = list(update.chat_context)
+        if update.error_message is not None:
+            rt.error_message = update.error_message
+
+        rt.updated_at = now_mono
+        rt.wall_updated_at = now_wall
+        if rt.wall_started_at is None:
+            rt.wall_started_at = now_wall
 
     async def emit_global_event(self, event: GlobalEventKind, message: str | None = None) -> None:
         """发起一次全局事件（泳道 2）：立即入队，事件驱动地即时下发给固件。
@@ -208,6 +251,30 @@ class StateManager:
             error_message=rt.error_message,
             elapsed_seconds=round(rt.elapsed(now), 1),
             is_done=rt.done,
+        )
+
+    def get_session_detail(self, session_id: str) -> SessionDetail | None:
+        """查询单个会话的完整详情（用于 GET /api/v1/session/{id}/detail）。
+
+        会话不存在时返回 None。返回的 :class:`SessionDetail` 包含元数据、
+        聊天上下文和墙钟时间戳，供详情页展示。
+        """
+        rt = self._sessions.get(session_id)
+        if rt is None:
+            return None
+        now = time.monotonic()
+        return SessionDetail(
+            session_id=rt.session_id,
+            plugin_type=rt.plugin_type,
+            status=rt.status,
+            current_task=rt.current_task,
+            error_message=rt.error_message,
+            elapsed_seconds=round(rt.elapsed(now), 1),
+            is_done=rt.done,
+            metadata=dict(rt.metadata),
+            chat_context=list(rt.chat_context),
+            started_at=rt.wall_started_at,
+            updated_at=rt.wall_updated_at,
         )
 
     # ------------------------------------------------------------------
@@ -284,7 +351,7 @@ class StateManager:
             raise
 
     async def _sweep_loop(self) -> None:
-        """定期移除“完成后停留超时”或“长时间无更新”的会话。"""
+        """定期移除“完成后停留超时”的会话（活跃会话不受影响）。"""
         logger.debug("Sweep loop running")
         try:
             while True:
@@ -305,10 +372,12 @@ class StateManager:
             logger.debug(f"Session expired and removed: {sid}")
 
     def _is_expired(self, rt: _SessionRuntime, now: float) -> bool:
-        """完成后停留超时，或长时间无更新，则视为可移除。"""
-        if rt.done and rt.done_since is not None and (now - rt.done_since) >= self._done_linger:
-            return True
-        return (now - rt.updated_at) >= self._idle_timeout
+        """仅已完成（IDLE）会话在停留超过 ``done_linger`` 后视为可移除。
+
+        活跃会话（``done=False``）永不因超时被清理，避免长任务期间无上报时
+        会话从屏幕消失；其收尾依赖上报端最终发送 ``idle`` / ``error`` 事件。
+        """
+        return rt.done and rt.done_since is not None and (now - rt.done_since) >= self._done_linger
 
     async def _full_sync_loop(self) -> None:
         """周期性全量同步：每隔 ``sync_interval`` 秒把整帧快照下发给固件。
@@ -326,12 +395,58 @@ class StateManager:
             raise
 
     async def _push_snapshot(self) -> None:
-        """下发一帧完整快照（``B`` -> 全量 ``S`` -> ``E``）。
+        """下发一帧完整快照（``B`` -> 全量 ``S`` + ``D`` -> ``E``）。
 
+        对每个活跃会话先发送 ``S``（会话概览），再发送若干条 ``D``（详情数据：
+        错误信息、元数据、聊天上下文），使固件详情页与守护进程状态完全一致。
         未连接时消费者会在发送环节自动丢弃，故此处不做连接判断，保持逻辑简单。
         """
         now = time.monotonic()
         await self._enqueue({"type": "sync_begin"})
         for rt in self._sessions.values():
             await self._enqueue_upsert(rt, now)
+            await self._enqueue_detail(rt)
         await self._enqueue({"type": "sync_end"})
+
+    async def _enqueue_detail(self, rt: _SessionRuntime) -> None:
+        """为单个会话下发详情数据（多条 ``D`` 命令）。
+
+        按顺序发送：错误信息 -> 元数据条目 -> 聊天消息。每种 kind 独立
+        使用 0-based 序号（seq），固件端据此写入对应槽位。每轮全量同步
+        时固件会在 S 命令处重置详情数据，因此 D 命令是全量重建。
+        """
+        sid = rt.session_id
+        # 错误信息（kind=0，seq=0）
+        await self._enqueue({
+            "type": "session_detail",
+            "data": {
+                "session_id": sid,
+                "kind": "0",
+                "seq": 0,
+                "text": rt.error_message or "",
+            },
+        })
+        # 元数据条目（kind=1，seq 从 0 开始）
+        for i, (key, value) in enumerate(rt.metadata.items()):
+            text = f"{key}: {value}"
+            await self._enqueue({
+                "type": "session_detail",
+                "data": {
+                    "session_id": sid,
+                    "kind": "1",
+                    "seq": i,
+                    "text": text,
+                },
+            })
+        # 聊天消息（kind=2，seq 从 0 开始）
+        for i, msg in enumerate(rt.chat_context):
+            text = f"{msg.role}: {msg.content}"
+            await self._enqueue({
+                "type": "session_detail",
+                "data": {
+                    "session_id": sid,
+                    "kind": "2",
+                    "seq": i,
+                    "text": text,
+                },
+            })

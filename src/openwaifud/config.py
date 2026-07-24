@@ -21,8 +21,7 @@ class Config:
     ble_scan_timeout: float = 10.0
     ble_connect_timeout: float = 10.0
     ble_write_timeout: float = 5.0
-    ble_reconnect_initial_delay: float = 1.0
-    ble_reconnect_max_delay: float = 30.0
+    ble_reconnect_interval: float = 5.0
 
     # Logging
     log_level: str = field(default_factory=lambda: os.getenv("OPENWAIFUD_LOG_LEVEL", "INFO"))
@@ -33,7 +32,5 @@ class Config:
     # 会话生命周期（驱动固件端“情绪”状态机）
     # 会话完成/空闲后先停留展示“✓完成”多少秒，再从列表移除
     session_done_linger: float = 5.0
-    # 待命会话多久无更新则自动移除（秒）
-    session_idle_timeout: float = 60.0
     # 会话清扫器轮询间隔（秒）
     session_sweep_interval: float = 1.0

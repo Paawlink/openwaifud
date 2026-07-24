@@ -135,6 +135,75 @@ class TestStateEndpoint:
         assert data["ble_connected"] is False
 
 
+class TestDetailEndpoint:
+    """Tests for POST /api/v1/session/detail and GET /api/v1/session/{id}/detail."""
+
+    async def test_post_detail_returns_200(self, client):
+        """POST /api/v1/session/detail with valid data returns 200."""
+        cli = await client
+        resp = await cli.post(
+            "/api/v1/session/detail",
+            json={
+                "session_id": "detail-test-1",
+                "metadata": {"source": "test", "directory": "/tmp"},
+                "chat_context": [
+                    {"role": "user", "content": "Hello"},
+                    {"role": "assistant", "content": "Hi there"},
+                ],
+            },
+        )
+        assert resp.status == 200
+        data = await resp.json()
+        assert data["success"] is True
+        assert data["session_id"] == "detail-test-1"
+
+    async def test_post_detail_invalid_json_returns_400(self, client):
+        """POST /api/v1/session/detail with invalid JSON returns 400."""
+        cli = await client
+        resp = await cli.post(
+            "/api/v1/session/detail",
+            data=b"not json",
+            headers={"Content-Type": "application/json"},
+        )
+        assert resp.status == 400
+
+    async def test_post_detail_missing_session_id_returns_422(self, client):
+        """POST /api/v1/session/detail without session_id returns 422."""
+        cli = await client
+        resp = await cli.post(
+            "/api/v1/session/detail",
+            json={"metadata": {"key": "value"}},
+        )
+        assert resp.status == 422
+
+    async def test_get_detail_returns_200(self, client):
+        """GET /api/v1/session/{id}/detail returns 200 after posting detail."""
+        cli = await client
+        # First post some detail data
+        await cli.post(
+            "/api/v1/session/detail",
+            json={
+                "session_id": "get-detail-test",
+                "metadata": {"source": "test"},
+                "chat_context": [{"role": "user", "content": "hi"}],
+            },
+        )
+        # Then GET it
+        resp = await cli.get("/api/v1/session/get-detail-test/detail")
+        assert resp.status == 200
+        data = await resp.json()
+        assert data["session_id"] == "get-detail-test"
+        assert data["metadata"]["source"] == "test"
+        assert len(data["chat_context"]) == 1
+        assert data["chat_context"][0]["role"] == "user"
+
+    async def test_get_detail_not_found_returns_404(self, client):
+        """GET /api/v1/session/{id}/detail for unknown session returns 404."""
+        cli = await client
+        resp = await cli.get("/api/v1/session/nonexistent/detail")
+        assert resp.status == 404
+
+
 class TestHealthEndpoint:
     """Tests for GET /api/v1/health."""
 

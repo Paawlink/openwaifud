@@ -13,14 +13,15 @@
 
 命令格式（UTF-8，单行，不含换行，长度 <= :data:`MAX_PAYLOAD` 字节）：
 
-======  =========================================  ================================
-命令    格式                                        含义
-======  =========================================  ================================
-开始    ``B``                                      快照同步开始（固件把现有会话标记为“未见”）
-更新    ``S|<sid>|<st>|<elapsed>|<plugin>|<task>``  新增或更新一个会话
-结束    ``E``                                      快照同步结束（固件移除本轮未再出现的会话）
-事件    ``G|<ev>|<detail>``                        全局事件（``ev`` 见 :data:`GLOBAL_EVENT_CHARS`）
-======  =========================================  ================================
+======  ==============================================  ================================
+命令    格式                                             含义
+======  ==============================================  ================================
+开始    ``B``                                           快照同步开始（固件把现有会话标记为“未见”）
+更新    ``S|<sid>|<st>|<elapsed>|<plugin>|<task>``       新增或更新一个会话
+详情    ``D|<sid>|<kind>|<seq>|<text>``                 会话详情数据（错误/元数据/聊天上下文）
+结束    ``E``                                           快照同步结束（固件移除本轮未再出现的会话）
+事件    ``G|<ev>|<detail>``                             全局事件（``ev`` 见 :data:`GLOBAL_EVENT_CHARS`）
+======  ==============================================  ================================
 
 其中 ``<st>`` 为单字符状态码（见 :data:`STATUS_CHARS`），``<elapsed>`` 为该会话
 已运行的整数秒数（固件收到后在本地按秒继续跳动）。字段以 ``|`` 分隔，因此
@@ -48,6 +49,12 @@ CMD_UPSERT = "S"
 CMD_SYNC_BEGIN = "B"
 CMD_SYNC_END = "E"
 CMD_GLOBAL = "G"
+CMD_DETAIL = "D"
+
+# 详情数据类型码（D 命令的 <kind> 字段）
+DETAIL_ERROR = "0"  # 错误信息
+DETAIL_META = "1"   # 元数据条目（text 格式 "key: value"）
+DETAIL_CHAT = "2"   # 聊天消息（text 格式 "role: content"）
 
 # AgentStatus -> 单字符状态码（固件据此显示中文标签与配色）
 STATUS_CHARS: dict[AgentStatus, str] = {
@@ -173,3 +180,35 @@ def encode_session_upsert(
     if len(task_bytes) > budget:
         task_bytes = task_bytes[:budget].decode("utf-8", errors="ignore").encode("utf-8")
     return prefix.encode("utf-8") + task_bytes
+
+
+def encode_session_detail(
+    session_id: str,
+    kind: str,
+    seq: int,
+    text: str,
+) -> bytes:
+    """编码“会话详情”命令。
+
+    格式：``D|<sid>|<kind>|<seq>|<text>``。先构造固定字段前缀，再用剩余字节
+    预算容纳（可能较长的）详情文本，确保整行 UTF-8 编码后不超过
+    :data:`MAX_PAYLOAD`。
+
+    :param kind: 详情类型码（见 :data:`DETAIL_ERROR` / :data:`DETAIL_META` /
+        :data:`DETAIL_CHAT`）。
+    :param seq:  序号（0-based），固件端据此替换对应槽位。
+    :param text: 详情文本。metadata 为 ``"key: value"``，chat 为 ``"role: content"``。
+    """
+    sid = _sanitize(session_id)
+    k = _sanitize(kind) or DETAIL_ERROR
+    s = max(0, int(seq))
+
+    prefix = f"{CMD_DETAIL}{FIELD_SEP}{sid}{FIELD_SEP}{k}{FIELD_SEP}{s}{FIELD_SEP}"
+    budget = MAX_PAYLOAD - len(prefix.encode("utf-8"))
+    if budget <= 0:
+        return _encode_line(prefix)
+
+    text_bytes = _sanitize(text).encode("utf-8")
+    if len(text_bytes) > budget:
+        text_bytes = text_bytes[:budget].decode("utf-8", errors="ignore").encode("utf-8")
+    return prefix.encode("utf-8") + text_bytes

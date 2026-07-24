@@ -107,6 +107,28 @@ def send_context(base_url: str, session_id: str, task: str, step: int) -> None:
     )
 
 
+def send_detail(base_url: str, session_id: str, task: str, step: int, status: str, step_msg: str) -> None:
+    """发送会话详情数据（元数据 + 聊天上下文），用于测试详情页展示。"""
+    post_json(
+        base_url,
+        "/api/v1/session/detail",
+        {
+            "session_id": session_id,
+            "metadata": {
+                "source": "mock-agent",
+                "directory": "/tmp/demo-project",
+                "step": step,
+                "status": status,
+            },
+            "chat_context": [
+                {"role": "user", "content": f"请帮我{task}"},
+                {"role": "assistant", "content": step_msg},
+                {"role": "tool", "content": f"step {step}: {status}"},
+            ],
+        },
+    )
+
+
 def send_status(base_url: str, status: str, session_id: str, error_message: str | None = None) -> None:
     post_json(
         base_url,
@@ -139,6 +161,7 @@ async def run_session(base_url: str, session_id: str, label: str, args: argparse
             task = args.task or f"{label}·{demo_step.task}"
             send_context(base_url, session_id, task, step_number)
             send_status(base_url, demo_step.status, session_id)
+            send_detail(base_url, session_id, task, step_number, demo_step.status, demo_step.message)
             print(f"[{session_id}] [{demo_step.status:8}] {task}")
             await asyncio.sleep(args.interval)
         cycles += 1
@@ -158,12 +181,21 @@ async def run(args: argparse.Namespace) -> int:
     try:
         if args.status:
             session_id = f"mock-{uuid4().hex[:8]}"
-            send_context(args.url, session_id, args.task or "单状态展示", 1)
+            task = args.task or "单状态展示"
+            send_context(args.url, session_id, task, 1)
             send_status(
                 args.url,
                 args.status,
                 session_id,
                 args.error_message if args.status == "error" else None,
+            )
+            send_detail(
+                args.url,
+                session_id,
+                task,
+                1,
+                args.status,
+                args.error_message if args.status == "error" else "单状态展示",
             )
             print(f"已发送状态: {args.status}")
             return 0

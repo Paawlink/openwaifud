@@ -276,8 +276,7 @@ python3 tools/mock_agent.py --status error --task "加载用户资料"
 
 | 参数 | 默认值 | 说明 |
 |------|--------|------|
-| `session_done_linger` | `5.0` | 会话完成后「✓完成」停留秒数，之后移除 |
-| `session_idle_timeout` | `60.0` | 会话超过该秒数无更新则自动移除 |
+| `session_done_linger` | `5.0` | 会话完成后「✓完成」停留秒数，之后移除（仅针对已完成会话；活跃会话不因超时移除） |
 | `session_sweep_interval` | `1.0` | 后台清扫器扫描周期（秒） |
 
 ## 项目结构

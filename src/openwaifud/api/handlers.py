@@ -6,7 +6,7 @@ from aiohttp import web
 from loguru import logger
 from pydantic import ValidationError
 
-from openwaifud.models import ConversationContext, GlobalEvent, StatusUpdate
+from openwaifud.models import ConversationContext, DetailUpdate, GlobalEvent, StatusUpdate
 from openwaifud.state.manager import StateManager
 
 
@@ -16,6 +16,8 @@ def setup_routes(app: web.Application, state_manager: StateManager) -> None:
     app.router.add_post("/api/v1/status", handlers.handle_status)
     app.router.add_post("/api/v1/context", handlers.handle_context)
     app.router.add_post("/api/v1/event", handlers.handle_event)
+    app.router.add_post("/api/v1/session/detail", handlers.handle_detail_post)
+    app.router.add_get("/api/v1/session/{session_id}/detail", handlers.handle_detail_get)
     app.router.add_get("/api/v1/state", handlers.handle_state)
     app.router.add_get("/api/v1/health", handlers.handle_health)
 
@@ -103,6 +105,49 @@ class APIHandlers:
             {"success": True, "event": event.event.value},
             status=200,
         )
+
+    async def handle_detail_post(self, request: web.Request) -> web.Response:
+        """POST /api/v1/session/detail - Receive session detail update."""
+        try:
+            data = await request.json()
+        except Exception:
+            return web.json_response(
+                {"error": "Invalid JSON body"},
+                status=400,
+            )
+
+        try:
+            update = DetailUpdate(**data)
+        except ValidationError as e:
+            return web.json_response(
+                {"error": "Validation failed", "details": e.errors()},
+                status=422,
+            )
+
+        await self._state_manager.update_session_detail(update)
+        logger.debug(f"Detail updated: session={update.session_id}")
+
+        return web.json_response(
+            {"success": True, "session_id": update.session_id},
+            status=200,
+        )
+
+    async def handle_detail_get(self, request: web.Request) -> web.Response:
+        """GET /api/v1/session/{session_id}/detail - Get session detail."""
+        session_id = request.match_info.get("session_id", "")
+        if not session_id:
+            return web.json_response(
+                {"error": "Missing session_id"},
+                status=400,
+            )
+
+        detail = self._state_manager.get_session_detail(session_id)
+        if detail is None:
+            return web.json_response(
+                {"error": "Session not found", "session_id": session_id},
+                status=404,
+            )
+        return web.json_response(detail.model_dump(mode="json"))
 
     async def handle_state(self, request: web.Request) -> web.Response:
         """GET /api/v1/state - Get current daemon state."""

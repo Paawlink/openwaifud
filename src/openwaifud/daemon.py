@@ -20,7 +20,6 @@ class OpenWaifuDaemon:
         self._state_manager = StateManager(
             queue_max_size=config.queue_max_size,
             done_linger=config.session_done_linger,
-            idle_timeout=config.session_idle_timeout,
             sweep_interval=config.session_sweep_interval,
         )
         self._ble_client = BLEClient(config)

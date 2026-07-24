@@ -60,6 +60,18 @@ class ConversationContext(BaseModel):
     timestamp: datetime = Field(default_factory=lambda: datetime.now(UTC))
 
 
+class ChatMessage(BaseModel):
+    """单条聊天消息（用于会话详情中的上下文展示）。
+
+    由 IDE 插件从对话流中提取并上报，守护进程原样存储并转发给固件详情页。
+    content 为摘要文本（已截断），不保证包含完整原始内容。
+    """
+
+    role: str = Field(..., description="消息角色：user/assistant/tool/system")
+    content: str = Field(default="", description="消息内容摘要（已截断）")
+    timestamp: datetime = Field(default_factory=lambda: datetime.now(UTC))
+
+
 class SessionInfo(BaseModel):
     """单个活跃 Agent 会话的快照（用于 GET /state 展示与 BLE 推送）。"""
 
@@ -74,12 +86,50 @@ class SessionInfo(BaseModel):
     is_done: bool = False
 
 
+class SessionDetail(BaseModel):
+    """单个会话的完整详情（用于详情页展示）。
+
+    在 :class:`SessionInfo` 的基础上扩展了元数据、聊天上下文和墙钟时间戳，
+    供 GET /api/v1/session/{id}/detail 返回，并经 BLE D 命令同步到固件。
+    """
+
+    session_id: str
+    plugin_type: str = "agent"
+    status: AgentStatus = AgentStatus.THINKING
+    current_task: str = ""
+    error_message: str | None = None
+    elapsed_seconds: float = 0.0
+    is_done: bool = False
+    # 由 IDE 插件上报的元数据（directory、source、agent 等）。
+    metadata: dict[str, Any] = Field(default_factory=dict)
+    # 最近若干条聊天消息摘要（用于详情页上下文展示）。
+    chat_context: list[ChatMessage] = Field(default_factory=list)
+    # 墙钟时间戳（UTC），供详情页展示"开始时间""最后更新"。
+    started_at: datetime | None = None
+    updated_at: datetime | None = None
+
+
+class DetailUpdate(BaseModel):
+    """会话详情更新请求（来自 IDE 插件）。
+
+    与 :class:`StatusUpdate` / :class:`ConversationContext` 不同，本接口用于
+    上报**详情级别**的数据：元数据与聊天上下文。仅传入的字段（非 None）
+    会被合并，便于插件在事件驱动下增量上报。
+    """
+
+    session_id: str = Field(..., description="目标会话 ID")
+    metadata: dict[str, Any] | None = None
+    chat_context: list[ChatMessage] | None = None
+    error_message: str | None = None
+    timestamp: datetime = Field(default_factory=lambda: datetime.now(UTC))
+
+
 class DaemonState(BaseModel):
     """Current daemon state snapshot."""
 
     agent_status: AgentStatus = AgentStatus.IDLE
     context: ConversationContext | None = None
-    # 当前所有活跃会话（驱动固件端“情绪”状态机）。
+    # 当前所有活跃会话（驱动固件端"情绪"状态机）。
     sessions: list[SessionInfo] = Field(default_factory=list)
     ble_connected: bool = False
     uptime_seconds: float = 0.0

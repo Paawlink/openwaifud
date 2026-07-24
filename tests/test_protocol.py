@@ -1,8 +1,12 @@
 """Tests for openwaifud.ble.protocol (session command-line protocol)."""
 
 from openwaifud.ble.protocol import (
+    CMD_DETAIL,
     CMD_GLOBAL,
     CMD_UPSERT,
+    DETAIL_CHAT,
+    DETAIL_ERROR,
+    DETAIL_META,
     DEVICE_NAME,
     GLOBAL_EVENT_CHARS,
     MAX_PAYLOAD,
@@ -10,6 +14,7 @@ from openwaifud.ble.protocol import (
     STATUS_CHARS,
     WRITE_CHAR_UUID,
     encode_global_event,
+    encode_session_detail,
     encode_session_upsert,
     global_event_char,
     status_char,
@@ -123,3 +128,47 @@ class TestEncodeUpsert:
         assert len(data) <= MAX_PAYLOAD
         # 截断后仍是合法 UTF-8（未切断多字节字符）
         data.decode("utf-8")
+
+
+class TestEncodeSessionDetail:
+    """D 命令（会话详情）编码测试。"""
+
+    def test_error_kind(self):
+        line = encode_session_detail("s1", DETAIL_ERROR, 0, "构建失败").decode("utf-8")
+        parts = line.split("|", 4)
+        assert parts[0] == CMD_DETAIL
+        assert parts[1] == "s1"
+        assert parts[2] == "0"
+        assert parts[3] == "0"
+        assert parts[4] == "构建失败"
+
+    def test_meta_kind(self):
+        line = encode_session_detail("s1", DETAIL_META, 2, "directory: /tmp").decode("utf-8")
+        parts = line.split("|", 4)
+        assert parts[0] == CMD_DETAIL
+        assert parts[2] == "1"
+        assert parts[3] == "2"
+        assert parts[4] == "directory: /tmp"
+
+    def test_chat_kind(self):
+        line = encode_session_detail("s1", DETAIL_CHAT, 0, "user: Hello").decode("utf-8")
+        parts = line.split("|", 4)
+        assert parts[0] == CMD_DETAIL
+        assert parts[2] == "2"
+        assert parts[4] == "user: Hello"
+
+    def test_text_separator_sanitized(self):
+        line = encode_session_detail("s1", DETAIL_META, 0, "a|b\nc").decode("utf-8")
+        parts = line.split("|", 4)
+        # 分隔符/换行被替换为空格
+        assert parts[4] == "a b c"
+
+    def test_long_text_truncated_within_limit(self):
+        data = encode_session_detail("s1", DETAIL_CHAT, 0, "中" * 300)
+        assert len(data) <= MAX_PAYLOAD
+        data.decode("utf-8")
+
+    def test_empty_text(self):
+        line = encode_session_detail("s1", DETAIL_ERROR, 0, "").decode("utf-8")
+        parts = line.split("|", 4)
+        assert parts[4] == ""

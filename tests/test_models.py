@@ -7,10 +7,13 @@ from pydantic import ValidationError
 
 from openwaifud.models import (
     AgentStatus,
+    ChatMessage,
     ConversationContext,
     DaemonState,
+    DetailUpdate,
     GlobalEvent,
     GlobalEventKind,
+    SessionDetail,
     StatusUpdate,
 )
 
@@ -136,3 +139,70 @@ class TestDaemonState:
         assert state.ble_connected is False
         assert state.uptime_seconds == 0.0
         assert isinstance(state.timestamp, datetime)
+
+
+class TestChatMessage:
+    """Tests for ChatMessage model."""
+
+    def test_create_with_required_fields(self):
+        msg = ChatMessage(role="user", content="Hello")
+        assert msg.role == "user"
+        assert msg.content == "Hello"
+        assert isinstance(msg.timestamp, datetime)
+
+    def test_default_content(self):
+        msg = ChatMessage(role="assistant")
+        assert msg.content == ""
+
+    def test_missing_role_raises(self):
+        with pytest.raises(ValidationError):
+            ChatMessage.model_validate({"content": "hi"})
+
+
+class TestSessionDetail:
+    """Tests for SessionDetail model."""
+
+    def test_default_values(self):
+        detail = SessionDetail(session_id="s1")
+        assert detail.session_id == "s1"
+        assert detail.plugin_type == "agent"
+        assert detail.status == AgentStatus.THINKING
+        assert detail.metadata == {}
+        assert detail.chat_context == []
+        assert detail.started_at is None
+        assert detail.updated_at is None
+
+    def test_with_full_data(self):
+        msgs = [ChatMessage(role="user", content="hi")]
+        detail = SessionDetail(
+            session_id="s1",
+            plugin_type="opencode",
+            status=AgentStatus.CODING,
+            current_task="Fix bug",
+            metadata={"dir": "/tmp"},
+            chat_context=msgs,
+        )
+        assert detail.plugin_type == "opencode"
+        assert len(detail.chat_context) == 1
+        assert detail.chat_context[0].role == "user"
+
+
+class TestDetailUpdate:
+    """Tests for DetailUpdate model."""
+
+    def test_create_with_metadata_only(self):
+        update = DetailUpdate(session_id="s1", metadata={"key": "value"})
+        assert update.session_id == "s1"
+        assert update.metadata == {"key": "value"}
+        assert update.chat_context is None
+        assert update.error_message is None
+
+    def test_create_with_chat_context(self):
+        msgs = [ChatMessage(role="tool", content="edit")] 
+        update = DetailUpdate(session_id="s1", chat_context=msgs)
+        assert update.chat_context is not None
+        assert len(update.chat_context) == 1
+
+    def test_missing_session_id_raises(self):
+        with pytest.raises(ValidationError):
+            DetailUpdate.model_validate({"metadata": {}})

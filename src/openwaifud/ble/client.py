@@ -7,7 +7,7 @@
 
 特性：
 - 支持按 MAC/UUID 地址直连，或未配置地址时按设备名扫描；
-- 指数退避自动重连；
+- 固定间隔自动重连（默认每 5 秒一次，不使用退避策略）；
 - 使用 asyncio.Lock 串行化写入；
 - 优雅降级：写入失败仅记录日志，不向上抛出异常。
 """
@@ -28,6 +28,7 @@ from loguru import logger
 from openwaifud.ble.protocol import (
     WRITE_CHAR_UUID,
     encode_global_event,
+    encode_session_detail,
     encode_session_upsert,
     encode_sync_begin,
     encode_sync_end,
@@ -48,7 +49,6 @@ class BLEClient:
         self._write_lock: asyncio.Lock = asyncio.Lock()
         self._reconnect_task: asyncio.Task[None] | None = None
         self._should_run: bool = False
-        self._current_backoff: float = config.ble_reconnect_initial_delay
         # BLE（重）连接成功后触发的回调（通常为 StateManager.resync_ble）
         self._on_connected: Callable[[], Coroutine[Any, Any, None]] | None = None
 
@@ -98,6 +98,14 @@ class BLEClient:
                     elapsed_seconds=data.get("elapsed_seconds", 0),
                     plugin_type=data.get("plugin_type", "agent"),
                     task=task,
+                )
+            elif msg_type == "session_detail":
+                data = message["data"]
+                payload = encode_session_detail(
+                    session_id=data["session_id"],
+                    kind=data["kind"],
+                    seq=data["seq"],
+                    text=data.get("text", ""),
                 )
             elif msg_type == "global_event":
                 data = message["data"]
@@ -169,7 +177,7 @@ class BLEClient:
             self._schedule_reconnect()
 
     def _schedule_reconnect(self) -> None:
-        """安排一次指数退避重连。"""
+        """安排一次固定间隔重连。"""
         if not self._should_run:
             return
         if self._reconnect_task and not self._reconnect_task.done():
@@ -177,10 +185,11 @@ class BLEClient:
         self._reconnect_task = asyncio.create_task(self._reconnect_loop())
 
     async def _reconnect_loop(self) -> None:
-        """指数退避重连：1s -> 2s -> 4s -> ... -> 30s 上限。"""
+        """固定间隔重连：每隔 ble_reconnect_interval 秒尝试一次，不使用退避策略。"""
+        interval = self._config.ble_reconnect_interval
         while self._should_run and not self.connected:
-            logger.info(f"Reconnecting in {self._current_backoff:.1f}s...")
-            await asyncio.sleep(self._current_backoff)
+            logger.info(f"Reconnecting in {interval:.1f}s...")
+            await asyncio.sleep(interval)
 
             if not self._should_run:
                 break
@@ -188,11 +197,6 @@ class BLEClient:
             if await self._connect_once():
                 logger.info("BLE reconnected successfully")
                 break
-
-            self._current_backoff = min(
-                self._current_backoff * 2,
-                self._config.ble_reconnect_max_delay,
-            )
 
     async def _connect_once(self) -> bool:
         """单次连接尝试（不安排重连），成功后定位 Write 特征。"""
@@ -209,7 +213,6 @@ class BLEClient:
                 await self._disconnect()
                 return False
             self._connected = True
-            self._current_backoff = self._config.ble_reconnect_initial_delay
             logger.info(f"BLE connected, write char={self._write_char.uuid}, MTU={self._client.mtu_size}")
             # 连接成功后重新同步会话看板（先清空，再下发当前所有会话）
             if self._on_connected is not None:
