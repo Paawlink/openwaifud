@@ -25,8 +25,11 @@ uv sync
 # 运行（仅 HTTP API）
 uv run openwaifud
 
-# 运行（带 BLE 设备）
+# 运行（带 BLE 设备，指定地址）
 uv run openwaifud --ble-address AA:BB:CC:DD:EE:FF
+
+# 运行（不指定地址时，自动按设备名 OpenWaifu 扫描连接）
+uv run openwaifud
 
 # 自定义端口和日志
 uv run openwaifud --port 9000 --log-level DEBUG
@@ -35,7 +38,7 @@ uv run openwaifud --port 9000 --log-level DEBUG
 uv run openwaifud --help
 ```
 
-支持环境变量配置：`OPENWAIFUD_HTTP_HOST`、`OPENWAIFUD_HTTP_PORT`、`OPENWAIFUD_BLE_ADDRESS`、`OPENWAIFUD_LOG_LEVEL`。CLI 参数优先级高于环境变量。
+支持环境变量配置：`OPENWAIFUD_HTTP_HOST`、`OPENWAIFUD_HTTP_PORT`、`OPENWAIFUD_BLE_ADDRESS`、`OPENWAIFUD_BLE_DEVICE_NAME`、`OPENWAIFUD_LOG_LEVEL`。CLI 参数优先级高于环境变量。
 
 ## HTTP API 文档
 
@@ -105,6 +108,17 @@ uv run openwaifud --help
     "metadata": {},
     "timestamp": "2026-07-24T10:00:00Z"
   },
+  "sessions": [
+    {
+      "session_id": "sess_abc123",
+      "plugin_type": "opencode",
+      "status": "coding",
+      "current_task": "实现用户登录功能",
+      "error_message": null,
+      "elapsed_seconds": 42.0,
+      "is_done": false
+    }
+  ],
   "ble_connected": true,
   "uptime_seconds": 3600.15,
   "timestamp": "2026-07-24T10:00:00Z"
@@ -135,7 +149,7 @@ OpenWaifuD 内置 Realtime 模块，自动监控本地 AI Agent 工具的会话�
 |------|----------|------|
 | Claude Code | `~/.claude/projects/<project>/<session>.jsonl` | JSONL |
 | Codex CLI | `~/.codex/sessions/YYYY/MM/DD/<session>.jsonl` | JSONL |
-| OpenCode | `~/.local/share/opencode/history/` | JSONL（best-effort） |
+| OpenCode | `~/.local/share/opencode/opencode.db`（旧版为 `history/`） | SQLite（旧版 JSONL） |
 
 ### 状态推断规则
 
@@ -168,6 +182,29 @@ uv run openwaifud --no-realtime
 uv run openwaifud --realtime-debounce 500
 ```
 
+### 模拟 Agent
+
+可以使用 `tools/mock_agent.py` 模拟一个 Agent 会话，方便测试页面和 BLE 屏幕效果：
+
+```bash
+# 终端 1：启动守护进程
+uv run openwaifud --no-realtime
+
+# 终端 2：循环发送 thinking/coding/testing/idle 状态
+python3 tools/mock_agent.py
+
+# 每 1 秒循环一次，只运行 2 轮
+python3 tools/mock_agent.py --interval 1 --repeat 2
+
+# 并发模拟 4 个会话，触发「火力全开」档位
+python3 tools/mock_agent.py --sessions 4
+
+# 只测试错误状态
+python3 tools/mock_agent.py --status error --task "加载用户资料"
+```
+
+默认 API 地址为 `http://127.0.0.1:8765`，可使用 `--url` 修改。
+
 ### 工作原理
 
 1. 启动时扫描各工具目录，找到当前活跃的会话文件
@@ -181,44 +218,62 @@ uv run openwaifud --realtime-debounce 500
 
 ## BLE 协议说明
 
+固件 `apps/openwaifu` 作为 BLE 从机（Peripheral），以名称 `OpenWaifu` 广播；守护进程作为主机（Central）连接后，维护一份「活跃会话注册表」，并把增量变化编码为一行行 UTF-8 命令写入固件的 Write 特征。固件按会话 ID 维护看板：**每个活跃会话固定占一行/一张卡片**，实时展示状态与已运行时长，而非滚动历史。
+
 ### GATT Service / Characteristic
 
-| 项目 | UUID |
+| 项目 | 值 |
 |------|------|
-| Service | `0000ff01-0000-1000-8000-00805f9b34fb` |
-| 状态特征 (Write) | `0000ff02-0000-1000-8000-00805f9b34fb` |
-| 上下文特征 (Write) | `0000ff03-0000-1000-8000-00805f9b34fb` |
+| 设备广播名 | `OpenWaifu` |
+| Service | `0000fd50-0000-1000-0880-00805f9b34fb` |
+| Write 特征 | `00000001-0000-1001-8001-00805f9b07d0` |
+| 编码 | UTF-8，单条命令最大 240 字节（超长按字符边界截断） |
 
-### 状态包格式（固定 4 字节）
+> 未配置 `--ble-address` 时，守护进程会按设备名 `OpenWaifu`（可用 `OPENWAIFUD_BLE_DEVICE_NAME` 覆盖）自动扫描连接，这在 macOS（地址为随机 UUID）上尤其方便。
 
-```
-[1B: protocol_version] [1B: status_code] [1B: error_code] [1B: reserved=0x00]
-```
+### 会话命令行协议
 
-| 字节 | 含义 | 说明 |
+每条命令以单字符命令码开头，字段用 `|` 分隔（字段内的 `|`、换行会被替换为空格）：
+
+| 命令 | 格式 | 含义 |
 |------|------|------|
-| 0 | 协议版本 | 当前为 `0x01` |
-| 1 | 状态码 | 见下方映射表 |
-| 2 | 错误码 | 正常为 `0x00` |
-| 3 | 保留 | 固定 `0x00` |
+| 清空 | `C` | 清空所有会话（重连后先下发，再逐个同步） |
+| 移除 | `X\|<sid>` | 移除某会话（完成/中止/超时） |
+| 更新 | `S\|<sid>\|<st>\|<elapsed>\|<plugin>\|<task>` | 新增或更新某会话 |
 
-### 上下文包格式（TLV 变长，最大 240 字节 payload）
-
-```
-[1B: protocol_version] [1B: msg_type=0x02] [2B: payload_length (big-endian)] [payload: UTF-8 JSON]
-```
-
-Payload 为 JSON 字符串，包含 `plugin`、`session_id`、`task` 字段。超过 240 字节时自动截断 `task` 内容。
+其中 `<st>` 为单字符状态码，`<elapsed>` 为已运行秒数（整数），`<plugin>` 为来源插件（空则为 `agent`），`<task>` 为当前任务文本。
 
 ### 状态码映射表
 
-| AgentStatus | 字节码 |
-|-------------|--------|
-| `idle` | `0x00` |
-| `thinking` | `0x01` |
-| `coding` | `0x02` |
-| `testing` | `0x03` |
-| `error` | `0x04` |
+| AgentStatus | 状态码 | 屏幕标签 |
+|-------------|--------|----------|
+| `thinking` | `T` | 思考中 |
+| `coding` | `C` | 编码中 |
+| `testing` | `V` | 测试中 |
+| `error` | `E` | 出错 |
+| `idle` | `I` | 完成 |
+
+> `idle` 表示会话已结束：固件会将其标记为「完成」并冻结计时，停留数秒后由守护进程下发 `X` 移除。
+
+### 情绪状态机（按活跃会话数量）
+
+固件根据当前活跃会话数量切换整体「情绪」与布局：
+
+| 活跃会话数 | 情绪 | 布局 |
+|------------|------|------|
+| 0 | 睡觉中 | 居中大号 Zzz |
+| 1 | 摸鱼中 | 单任务大卡片（大号计时器） |
+| 2-3 | 认真搬砖 | 会话列表 |
+| 4-6 | 火力全开 | 会话列表 |
+| >6 | 要炸了 | 会话列表 |
+
+### 会话生命周期参数
+
+| 参数 | 默认值 | 说明 |
+|------|--------|------|
+| `session_done_linger` | `5.0` | 会话完成后「✓完成」停留秒数，之后移除 |
+| `session_idle_timeout` | `60.0` | 会话超过该秒数无更新则自动移除 |
+| `session_sweep_interval` | `1.0` | 后台清扫器扫描周期（秒） |
 
 ## 项目结构
 
@@ -235,11 +290,11 @@ src/openwaifud/
 │   └── server.py        # aiohttp 服务器启动与生命周期
 ├── ble/
 │   ├── __init__.py
-│   ├── client.py        # BLE 连接管理（重连、写入）
-│   └── protocol.py      # GATT 协议编解码（状态包 & 上下文包）
+│   ├── client.py        # BLE 主机连接管理（扫描/直连、重连、写入）
+│   └── protocol.py      # BLE 会话命令行协议（S/X/C 命令 + UTF-8 编码）
 └── state/
     ├── __init__.py
-    └── manager.py       # 异步状态管理器（队列 + BLE 回调消费）
+    └── manager.py       # 异步会话状态管理器（会话注册表 + 清扫器 + BLE 队列消费）
 ```
 
 ## 开发指南

@@ -2,7 +2,7 @@
 
 import json
 
-from openwaifud.realtime.parsers import ClaudeCodeParser, CodexParser, OpenCodeParser
+from openwaifud.realtime.parsers import ClaudeCodeParser, CodexParser
 
 
 class TestClaudeCodeParser:
@@ -365,79 +365,3 @@ class TestCodexParser:
         parser = CodexParser()
         parser._base_dir = tmp_path / "nonexistent"
         assert parser.get_watch_paths() == []
-
-
-class TestOpenCodeParser:
-    """Tests for OpenCodeParser."""
-
-    def test_get_watch_paths_missing_dir(self, tmp_path):
-        """get_watch_paths() returns empty list when directory does not exist."""
-        parser = OpenCodeParser()
-        parser._base_dir = tmp_path / "nonexistent"
-        assert parser.get_watch_paths() == []
-
-    def test_get_watch_paths_existing_dir(self, tmp_path):
-        """get_watch_paths() returns list when directory exists."""
-        parser = OpenCodeParser()
-        parser._base_dir = tmp_path
-        assert parser.get_watch_paths() == [tmp_path]
-
-    def test_parse_latest_basic(self, tmp_path):
-        """parse_latest() basic parsing with best-effort format."""
-        parser = OpenCodeParser()
-        parser._base_dir = tmp_path
-
-        session_file = tmp_path / "opencode_session.jsonl"
-        lines = [
-            json.dumps(
-                {
-                    "type": "user",
-                    "message": {"role": "user", "content": "explain this code"},
-                }
-            ),
-            json.dumps(
-                {
-                    "type": "assistant",
-                    "message": {"role": "assistant", "content": "This code does X."},
-                }
-            ),
-        ]
-        session_file.write_text("\n".join(lines) + "\n")
-
-        result = parser.parse_latest(session_file)
-        assert result is not None
-        assert result.plugin_type == "opencode"
-        assert result.last_role == "assistant"
-        assert "This code does X." in result.last_content
-        assert result.session_id == "opencode_session"
-
-    def test_parse_latest_with_tool_use(self, tmp_path):
-        """parse_latest() detects tool_use in OpenCode format."""
-        parser = OpenCodeParser()
-        parser._base_dir = tmp_path
-
-        session_file = tmp_path / "oc_tools.jsonl"
-        line = json.dumps(
-            {
-                "type": "assistant",
-                "message": {
-                    "role": "assistant",
-                    "content": [
-                        {"type": "text", "text": "Writing file..."},
-                        {"type": "tool_use", "name": "edit_file"},
-                    ],
-                },
-            }
-        )
-        session_file.write_text(line + "\n")
-
-        result = parser.parse_latest(session_file)
-        assert result is not None
-        assert result.has_tool_use is True
-        assert "edit_file" in result.tool_names
-
-    def test_parse_latest_file_not_exists(self, tmp_path):
-        """parse_latest() returns None for non-existent file."""
-        parser = OpenCodeParser()
-        result = parser.parse_latest(tmp_path / "nope.jsonl")
-        assert result is None

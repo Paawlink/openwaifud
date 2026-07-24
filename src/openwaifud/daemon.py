@@ -18,7 +18,12 @@ class OpenWaifuDaemon:
 
     def __init__(self, config: Config) -> None:
         self._config = config
-        self._state_manager = StateManager(queue_max_size=config.queue_max_size)
+        self._state_manager = StateManager(
+            queue_max_size=config.queue_max_size,
+            done_linger=config.session_done_linger,
+            idle_timeout=config.session_idle_timeout,
+            sweep_interval=config.session_sweep_interval,
+        )
         self._ble_client = BLEClient(config)
         self._http_server = HTTPServer(
             state_manager=self._state_manager,
@@ -47,6 +52,8 @@ class OpenWaifuDaemon:
 
         # Wire BLE callback into state manager
         self._state_manager.set_ble_callback(self._ble_client.handle_message)
+        # BLE（重）连接后由状态管理器重新同步会话看板
+        self._ble_client.set_on_connected(self._state_manager.resync_ble)
 
         # Start state consumer (background queue processing)
         await self._state_manager.start_consumer()

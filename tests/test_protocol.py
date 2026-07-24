@@ -1,113 +1,100 @@
-"""Tests for openwaifud.ble.protocol."""
-
-import pytest
+"""Tests for openwaifud.ble.protocol (session command-line protocol)."""
 
 from openwaifud.ble.protocol import (
-    MAX_CONTEXT_PAYLOAD,
-    BLEProtocolError,
-    decode_context_packet,
-    decode_status_packet,
-    encode_context_packet,
-    encode_status_packet,
+    CMD_CLEAR,
+    CMD_REMOVE,
+    CMD_UPSERT,
+    DEVICE_NAME,
+    MAX_PAYLOAD,
+    SERVICE_UUID,
+    STATUS_CHARS,
+    WRITE_CHAR_UUID,
+    encode_clear,
+    encode_session_remove,
+    encode_session_upsert,
+    status_char,
 )
 from openwaifud.models import AgentStatus
 
 
-class TestStatusPacket:
-    """Tests for status packet encode/decode."""
+class TestGattIdentifiers:
+    """确保 GATT 标识与固件保持一致。"""
 
-    def test_encode_returns_4_bytes(self):
-        """encode_status_packet returns exactly 4 bytes."""
-        data = encode_status_packet(AgentStatus.IDLE)
-        assert len(data) == 4
+    def test_device_name(self):
+        assert DEVICE_NAME == "OpenWaifu"
 
-    def test_roundtrip(self):
-        """Encoding then decoding yields the same status."""
-        original_status = AgentStatus.CODING
-        encoded = encode_status_packet(original_status, error_code=42)
-        version, decoded_status, error_code = decode_status_packet(encoded)
-        assert decoded_status == original_status
-        assert error_code == 42
-        assert version == 0x01
+    def test_service_uuid(self):
+        assert SERVICE_UUID == "0000fd50-0000-1000-0880-00805f9b34fb"
 
-    @pytest.mark.parametrize("status", list(AgentStatus))
-    def test_all_statuses_encode_decode(self, status):
-        """All AgentStatus values can be correctly encoded and decoded."""
-        encoded = encode_status_packet(status)
-        version, decoded_status, error_code = decode_status_packet(encoded)
-        assert decoded_status == status
-        assert error_code == 0
-
-    def test_decode_too_short_raises_error(self):
-        """decode_status_packet raises BLEProtocolError on short data."""
-        with pytest.raises(BLEProtocolError, match="too short"):
-            decode_status_packet(b"\x01\x00")
-
-    def test_decode_invalid_status_code_raises_error(self):
-        """decode_status_packet raises BLEProtocolError on unknown status code."""
-        # Construct an invalid packet: version=1, status_code=0xFF, error=0, reserved=0
-        invalid_data = b"\x01\xff\x00\x00"
-        with pytest.raises(BLEProtocolError, match="Unknown status code"):
-            decode_status_packet(invalid_data)
+    def test_write_char_uuid(self):
+        assert WRITE_CHAR_UUID == "00000001-0000-1001-8001-00805f9b07d0"
 
 
-class TestContextPacket:
-    """Tests for context packet encode/decode."""
+class TestStatusChars:
+    """状态码映射。"""
 
-    def test_encode_returns_tlv_format(self):
-        """encode_context_packet returns correct TLV header format."""
-        data = encode_context_packet("opencode", "session-1", "fix bug")
-        # Header: 1B version + 1B msg_type + 2B length = 4 bytes
-        assert len(data) >= 4
-        # Check msg_type byte
-        assert data[1] == 0x02
+    def test_all_statuses_have_chars(self):
+        for status in AgentStatus:
+            assert status in STATUS_CHARS
+            assert len(STATUS_CHARS[status]) == 1
 
-    def test_roundtrip(self):
-        """Encoding then decoding yields the same context data."""
-        plugin_type = "claudecode"
-        session_id = "sess-abc"
-        current_task = "Implement feature X"
+    def test_status_char_values(self):
+        assert status_char(AgentStatus.THINKING) == "T"
+        assert status_char(AgentStatus.CODING) == "C"
+        assert status_char(AgentStatus.TESTING) == "V"
+        assert status_char(AgentStatus.ERROR) == "E"
+        assert status_char(AgentStatus.IDLE) == "I"
 
-        encoded = encode_context_packet(plugin_type, session_id, current_task)
-        version, payload = decode_context_packet(encoded)
 
-        assert version == 0x01
-        assert payload["plugin"] == plugin_type
-        assert payload["session_id"] == session_id
-        assert payload["task"] == current_task
+class TestEncodeClear:
+    def test_clear(self):
+        assert encode_clear().decode("utf-8") == CMD_CLEAR
 
-    def test_long_task_truncated(self):
-        """Super long task string is truncated to fit MAX_CONTEXT_PAYLOAD."""
-        long_task = "A" * 500  # Way longer than MAX_CONTEXT_PAYLOAD
-        encoded = encode_context_packet("opencode", "s1", long_task)
 
-        # Total payload (after header) should not exceed MAX_CONTEXT_PAYLOAD
-        payload_length = len(encoded) - 4
-        assert payload_length <= MAX_CONTEXT_PAYLOAD
+class TestEncodeRemove:
+    def test_remove(self):
+        line = encode_session_remove("abc123").decode("utf-8")
+        assert line == f"{CMD_REMOVE}|abc123"
 
-        # Decode and verify truncation happened
-        _, payload = decode_context_packet(encoded)
-        assert payload["task"].endswith("...")
-        assert len(payload["task"]) < len(long_task)
+    def test_remove_sanitizes_separator(self):
+        line = encode_session_remove("a|b").decode("utf-8")
+        # sid 中的分隔符被替换为空格，避免破坏解析
+        assert line == f"{CMD_REMOVE}|a b"
 
-    def test_decode_too_short_raises_error(self):
-        """decode_context_packet raises BLEProtocolError on short data."""
-        with pytest.raises(BLEProtocolError, match="too short"):
-            decode_context_packet(b"\x01")
 
-    def test_decode_wrong_msg_type_raises_error(self):
-        """decode_context_packet raises BLEProtocolError on wrong msg_type."""
-        # Header with msg_type=0x01 (status) instead of 0x02 (context)
-        invalid_data = b"\x01\x01\x00\x05hello"
-        with pytest.raises(BLEProtocolError, match="Unexpected message type"):
-            decode_context_packet(invalid_data)
+class TestEncodeUpsert:
+    def test_basic_fields(self):
+        line = encode_session_upsert(
+            session_id="s1",
+            status=AgentStatus.CODING,
+            elapsed_seconds=42,
+            plugin_type="opencode",
+            task="实现用户登录",
+        ).decode("utf-8")
+        parts = line.split("|", 5)
+        assert parts[0] == CMD_UPSERT
+        assert parts[1] == "s1"
+        assert parts[2] == "C"
+        assert parts[3] == "42"
+        assert parts[4] == "opencode"
+        assert parts[5] == "实现用户登录"
 
-    def test_decode_truncated_packet_raises_error(self):
-        """decode_context_packet raises BLEProtocolError when packet is truncated."""
-        # Header says payload_length=100 but only 3 bytes of payload
-        import struct
+    def test_task_separator_sanitized(self):
+        line = encode_session_upsert("s1", AgentStatus.THINKING, 0, "codex", "a|b|c").decode("utf-8")
+        parts = line.split("|", 5)
+        # 任务里的 | 被替换为空格，因此 split 后正好 6 段
+        assert parts[5] == "a b c"
 
-        header = struct.pack("!BBH", 0x01, 0x02, 100)
-        truncated = header + b"abc"
-        with pytest.raises(BLEProtocolError, match="truncated"):
-            decode_context_packet(truncated)
+    def test_negative_elapsed_clamped(self):
+        line = encode_session_upsert("s1", AgentStatus.IDLE, -5, "codex", "").decode("utf-8")
+        assert line.split("|")[3] == "0"
+
+    def test_empty_plugin_defaults_to_agent(self):
+        line = encode_session_upsert("s1", AgentStatus.IDLE, 0, "", "").decode("utf-8")
+        assert line.split("|")[4] == "agent"
+
+    def test_long_task_truncated_within_limit(self):
+        data = encode_session_upsert("s1", AgentStatus.CODING, 1, "opencode", "中" * 300)
+        assert len(data) <= MAX_PAYLOAD
+        # 截断后仍是合法 UTF-8（未切断多字节字符）
+        data.decode("utf-8")

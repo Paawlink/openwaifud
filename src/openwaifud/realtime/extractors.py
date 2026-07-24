@@ -5,8 +5,16 @@ from __future__ import annotations
 from openwaifud.models import AgentStatus, ConversationContext, StatusUpdate
 from openwaifud.realtime.parsers import ParseResult
 
-# 工具名 → 状态映射关键词
-_CODING_TOOLS = {"write_file", "edit_file", "create_file", "str_replace_editor", "write", "patch"}
+# 工具名 → 状态映射关键词（涵盖 OpenCode/Claude Code/Codex 常见工具名）
+_CODING_TOOLS = {
+    "write_file",
+    "edit_file",
+    "create_file",
+    "str_replace_editor",
+    "write",
+    "edit",
+    "patch",
+}
 _TESTING_TOOLS = {"run_command", "execute", "bash", "terminal", "shell"}
 _TESTING_KEYWORDS = {"test", "pytest", "unittest", "assert", "spec", "coverage"}
 _ERROR_KEYWORDS = {"error", "failed", "exception", "traceback", "panic", "fatal"}
@@ -19,7 +27,7 @@ class StatusExtractor:
         """Infer agent status from parse result.
 
         Priority:
-        1. ERROR: content contains error keywords
+        1. ERROR: explicit error flag (e.g. failed tool) or error keywords
         2. CODING: has tool_use with coding-related tools
         3. TESTING: has tool_use with execution tools or testing keywords
         4. THINKING: assistant message without tool use
@@ -28,7 +36,11 @@ class StatusExtractor:
         content_lower = result.last_content.lower()
         tool_names_lower = {t.lower() for t in result.tool_names}
 
-        # Check for error indicators
+        # Explicit error signal from the parser (e.g. tool state == error)
+        if result.has_error:
+            return AgentStatus.ERROR
+
+        # Check for error indicators in assistant text
         if result.last_role == "assistant" and any(kw in content_lower for kw in _ERROR_KEYWORDS):
             return AgentStatus.ERROR
 
@@ -61,15 +73,19 @@ class StatusExtractor:
         # current_task: use last user content or last content as fallback
         current_task = result.last_content[:100] if result.last_content else ""
 
+        metadata: dict[str, object] = {
+            "has_tool_use": result.has_tool_use,
+            "tool_names": result.tool_names,
+            "last_role": result.last_role,
+        }
+        # Merge parser-provided extras (project_path, agent, model_id, ...)
+        metadata.update(result.metadata)
+
         return ConversationContext(
             plugin_type=result.plugin_type,
             session_id=result.session_id,
             current_task=current_task,
-            metadata={
-                "has_tool_use": result.has_tool_use,
-                "tool_names": result.tool_names,
-                "last_role": result.last_role,
-            },
+            metadata=metadata,
             timestamp=result.timestamp,
         )
 
@@ -80,7 +96,7 @@ class StatusExtractor:
 
         error_message = None
         if status == AgentStatus.ERROR:
-            error_message = result.last_content[:200]
+            error_message = result.last_content[:200] or "agent reported an error"
 
         update = StatusUpdate(
             status=status,

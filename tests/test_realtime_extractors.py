@@ -20,6 +20,8 @@ def _make_result(
     tool_names: list[str] | None = None,
     plugin_type: str = "claudecode",
     session_id: str = "test-session",
+    has_error: bool = False,
+    metadata: dict | None = None,
 ) -> ParseResult:
     """Helper to create a ParseResult with sensible defaults."""
     return ParseResult(
@@ -29,6 +31,8 @@ def _make_result(
         last_content=last_content,
         has_tool_use=has_tool_use,
         tool_names=tool_names or [],
+        has_error=has_error,
+        metadata=metadata or {},
     )
 
 
@@ -131,6 +135,22 @@ class TestExtractStatus:
         )
         assert extractor.extract_status(result) == AgentStatus.TESTING
 
+    def test_has_error_flag_returns_error(self, extractor):
+        """Explicit has_error flag (e.g. failed tool) → ERROR regardless of content."""
+        result = _make_result(
+            last_role="assistant",
+            has_tool_use=True,
+            tool_names=["bash"],
+            last_content="running the command",
+            has_error=True,
+        )
+        assert extractor.extract_status(result) == AgentStatus.ERROR
+
+    def test_opencode_edit_tool_returns_coding(self, extractor):
+        """OpenCode 'edit' tool → CODING."""
+        result = _make_result(has_tool_use=True, tool_names=["edit"])
+        assert extractor.extract_status(result) == AgentStatus.CODING
+
 
 class TestExtractContext:
     """Tests for StatusExtractor.extract_context()."""
@@ -177,6 +197,15 @@ class TestExtractContext:
         result = _make_result(last_role="user")
         context = extractor.extract_context(result)
         assert context.metadata["last_role"] == "user"
+
+    def test_context_merges_parser_metadata(self, extractor):
+        """extract_context() merges parser-provided metadata (project_path/agent)."""
+        result = _make_result(metadata={"project_path": "/tmp/proj", "agent": "build"})
+        context = extractor.extract_context(result)
+        assert context.metadata["project_path"] == "/tmp/proj"
+        assert context.metadata["agent"] == "build"
+        # Built-in keys are still present alongside merged extras
+        assert "has_tool_use" in context.metadata
 
 
 class TestExtract:

@@ -1,123 +1,138 @@
-"""BLE GATT protocol encoding/decoding for OpenWaifuD."""
+"""BLE 会话协议：将 Agent 会话状态编码为固件可解析的命令行，写入 Write 特征。
+
+设计目标（与 OpenWaifu 固件一致）：固件屏幕不再是“历史消息滚动列表”，而是一块
+**实时会话看板**——每个活跃会话固定占用一行/一张卡片，随会话状态机变化更新，
+会话结束后整行移除。为此本模块把守护进程侧的会话变化编码为紧凑的单行命令：
+
+命令格式（UTF-8，单行，不含换行，长度 <= :data:`MAX_PAYLOAD` 字节）：
+
+======  =====================================  ================================
+命令    格式                                    含义
+======  =====================================  ================================
+清空    ``C``                                  清空固件端所有会话（连接/重连时下发）
+移除    ``X|<sid>``                             移除某个会话行（完成 / 中止）
+更新    ``S|<sid>|<st>|<elapsed>|<plugin>|<task>``  新增或更新一个会话
+======  =====================================  ================================
+
+其中 ``<st>`` 为单字符状态码（见 :data:`STATUS_CHARS`），``<elapsed>`` 为该会话
+已运行的整数秒数（固件收到后在本地按秒继续跳动）。字段以 ``|`` 分隔，因此 ``sid``
+与 ``task`` 中的 ``|``、换行等字符会在编码前被替换为空格。
+"""
 
 from __future__ import annotations
-
-import json
-import struct
 
 from openwaifud.models import AgentStatus
 
 # ---------------------------------------------------------------------------
-# GATT Service / Characteristic UUIDs
+# 设备与 GATT 标识（须与固件 apps/openwaifu 保持一致）
 # ---------------------------------------------------------------------------
 
-SERVICE_UUID = "0000ff01-0000-1000-8000-00805f9b34fb"
-CHAR_STATUS_UUID = "0000ff02-0000-1000-8000-00805f9b34fb"  # 状态特征 (Write)
-CHAR_CONTEXT_UUID = "0000ff03-0000-1000-8000-00805f9b34fb"  # 上下文特征 (Write)
+DEVICE_NAME = "OpenWaifu"
+SERVICE_UUID = "0000fd50-0000-1000-0880-00805f9b34fb"
+WRITE_CHAR_UUID = "00000001-0000-1001-8001-00805f9b07d0"
 
-# ---------------------------------------------------------------------------
-# Protocol constants
-# ---------------------------------------------------------------------------
+# 单条命令 UTF-8 编码后的最大字节数（与固件 OPENWAIFU_BLE_MAX_MSG_LEN 对齐）
+MAX_PAYLOAD: int = 240
 
-PROTOCOL_VERSION: int = 0x01
-MSG_TYPE_STATUS: int = 0x01
-MSG_TYPE_CONTEXT: int = 0x02
+# 字段分隔符与命令前缀
+FIELD_SEP = "|"
+CMD_UPSERT = "S"
+CMD_REMOVE = "X"
+CMD_CLEAR = "C"
 
-# AgentStatus -> byte code 映射
-STATUS_CODE_MAP: dict[AgentStatus, int] = {
-    AgentStatus.IDLE: 0x00,
-    AgentStatus.THINKING: 0x01,
-    AgentStatus.CODING: 0x02,
-    AgentStatus.TESTING: 0x03,
-    AgentStatus.ERROR: 0x04,
+# AgentStatus -> 单字符状态码（固件据此显示中文标签与配色）
+STATUS_CHARS: dict[AgentStatus, str] = {
+    AgentStatus.THINKING: "T",
+    AgentStatus.CODING: "C",
+    AgentStatus.TESTING: "V",
+    AgentStatus.ERROR: "E",
+    AgentStatus.IDLE: "I",
 }
 
-MAX_CONTEXT_PAYLOAD: int = 240  # BLE MTU 安全限制
-
 
 # ---------------------------------------------------------------------------
-# Exceptions
+# Exceptions（保留以兼容既有调用方）
 # ---------------------------------------------------------------------------
 
 
 class BLEProtocolError(Exception):
-    """BLE protocol encoding/decoding error."""
+    """BLE 协议编码错误。"""
 
 
 class BLEConnectionError(Exception):
-    """BLE connection failure."""
+    """BLE 连接失败。"""
 
 
 class BLEWriteError(Exception):
-    """BLE characteristic write failure."""
+    """BLE 特征写入失败。"""
 
 
 # ---------------------------------------------------------------------------
-# Internal helpers
+# 内部工具
 # ---------------------------------------------------------------------------
 
 
-def _code_to_status(code: int) -> AgentStatus:
-    """将字节码映射回 AgentStatus。"""
-    reverse_map = {v: k for k, v in STATUS_CODE_MAP.items()}
-    if code not in reverse_map:
-        raise BLEProtocolError(f"Unknown status code: 0x{code:02x}")
-    return reverse_map[code]
+def _sanitize(text: str) -> str:
+    """去除会破坏命令行解析的字符（分隔符、换行、回车），并压缩两端空白。"""
+    if not text:
+        return ""
+    cleaned = text.replace(FIELD_SEP, " ").replace("\r", " ").replace("\n", " ")
+    return cleaned.strip()
+
+
+def status_char(status: AgentStatus) -> str:
+    """返回状态对应的单字符命令码，未知状态回退为空闲 ``I``。"""
+    return STATUS_CHARS.get(status, "I")
+
+
+def _encode_line(text: str) -> bytes:
+    """将整行命令编码为 UTF-8，超长时按字符边界安全截断。"""
+    payload = text.encode("utf-8")
+    if len(payload) <= MAX_PAYLOAD:
+        return payload
+    return payload[:MAX_PAYLOAD].decode("utf-8", errors="ignore").encode("utf-8")
 
 
 # ---------------------------------------------------------------------------
-# Status packet: fixed 4 bytes
-# [1B: protocol_version] [1B: status_code] [1B: error_code] [1B: reserved=0x00]
+# 命令编码
 # ---------------------------------------------------------------------------
 
 
-def encode_status_packet(status: AgentStatus, error_code: int = 0) -> bytes:
-    """编码状态包为 4 字节。"""
-    status_code = STATUS_CODE_MAP[status]
-    return struct.pack("!BBBB", PROTOCOL_VERSION, status_code, error_code & 0xFF, 0x00)
+def encode_clear() -> bytes:
+    """编码“清空全部会话”命令。"""
+    return _encode_line(CMD_CLEAR)
 
 
-def decode_status_packet(data: bytes) -> tuple[int, AgentStatus, int]:
-    """解码 4 字节状态包，返回 (version, status, error_code)。"""
-    if len(data) < 4:
-        raise BLEProtocolError(f"Status packet too short: {len(data)} bytes, expected 4")
-    version, status_code, error_code, _ = struct.unpack("!BBBB", data[:4])
-    status = _code_to_status(status_code)
-    return version, status, error_code
+def encode_session_remove(session_id: str) -> bytes:
+    """编码“移除某个会话”命令。"""
+    sid = _sanitize(session_id)
+    return _encode_line(f"{CMD_REMOVE}{FIELD_SEP}{sid}")
 
 
-# ---------------------------------------------------------------------------
-# Context packet: variable length, TLV format (max 240 bytes payload)
-# [1B: protocol_version] [1B: msg_type=0x02] [2B: payload_length (big-endian)] [payload: UTF-8 JSON]
-# ---------------------------------------------------------------------------
+def encode_session_upsert(
+    session_id: str,
+    status: AgentStatus,
+    elapsed_seconds: int,
+    plugin_type: str,
+    task: str,
+) -> bytes:
+    """编码“新增/更新会话”命令。
 
+    先构造固定字段前缀，再用剩余字节预算容纳（可能较长的）任务描述，确保整行
+    UTF-8 编码后不超过 :data:`MAX_PAYLOAD`。
+    """
+    sid = _sanitize(session_id)
+    plugin = _sanitize(plugin_type) or "agent"
+    st = status_char(status)
+    elapsed = max(0, int(elapsed_seconds))
 
-def encode_context_packet(plugin_type: str, session_id: str, current_task: str = "") -> bytes:
-    """编码上下文包。如果 payload 超过 240 字节，truncate task 字段。"""
-    payload_dict = {"plugin": plugin_type, "session_id": session_id, "task": current_task}
-    payload_bytes = json.dumps(payload_dict, ensure_ascii=False).encode("utf-8")
+    prefix = f"{CMD_UPSERT}{FIELD_SEP}{sid}{FIELD_SEP}{st}{FIELD_SEP}{elapsed}{FIELD_SEP}{plugin}{FIELD_SEP}"
+    budget = MAX_PAYLOAD - len(prefix.encode("utf-8"))
+    if budget <= 0:
+        # 极端情况下 sid/plugin 已占满预算，直接截断整行
+        return _encode_line(prefix)
 
-    # 如果超长，截断 task
-    if len(payload_bytes) > MAX_CONTEXT_PAYLOAD:
-        payload_dict["task"] = current_task[:50] + "..."
-        payload_bytes = json.dumps(payload_dict, ensure_ascii=False).encode("utf-8")
-
-    if len(payload_bytes) > MAX_CONTEXT_PAYLOAD:
-        raise BLEProtocolError(f"Context payload too large: {len(payload_bytes)} bytes")
-
-    header = struct.pack("!BBH", PROTOCOL_VERSION, MSG_TYPE_CONTEXT, len(payload_bytes))
-    return header + payload_bytes
-
-
-def decode_context_packet(data: bytes) -> tuple[int, dict]:
-    """解码上下文包，返回 (version, payload_dict)。"""
-    if len(data) < 4:
-        raise BLEProtocolError(f"Context packet too short: {len(data)} bytes")
-    version, msg_type, payload_length = struct.unpack("!BBH", data[:4])
-    if msg_type != MSG_TYPE_CONTEXT:
-        raise BLEProtocolError(f"Unexpected message type: 0x{msg_type:02x}")
-    if len(data) < 4 + payload_length:
-        raise BLEProtocolError(f"Packet truncated: expected {4 + payload_length}, got {len(data)}")
-    payload_bytes = data[4 : 4 + payload_length]
-    payload_dict: dict = json.loads(payload_bytes.decode("utf-8"))
-    return version, payload_dict
+    task_bytes = _sanitize(task).encode("utf-8")
+    if len(task_bytes) > budget:
+        task_bytes = task_bytes[:budget].decode("utf-8", errors="ignore").encode("utf-8")
+    return prefix.encode("utf-8") + task_bytes
