@@ -1,0 +1,33 @@
+[project]
+name = "openwaifud"
+version = "0.1.0"
+description = "Daemon service syncing agent work status to Tuya T5AI Board via BLE"
+requires-python = ">=3.11"
+dependencies = [
+    "aiohttp>=3.9.0",
+    "bleak>=0.21.0",
+    "loguru>=0.7.0",
+    "pydantic>=2.0.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "ruff>=0.4.0",
+    "pytest>=8.0.0",
+    "pytest-asyncio>=0.23.0",
+    "pytest-aiohttp>=1.0.0",
+]
+
+[project.scripts]
+openwaifud = "openwaifud.__main__:main"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/openwaifud"]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]
