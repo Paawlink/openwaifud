@@ -125,6 +125,60 @@ uv run openwaifud --help
 }
 ```
 
+## Realtime 文件监控
+
+OpenWaifuD 内置 Realtime 模块，自动监控本地 AI Agent 工具的会话文件，实时提取工作状态并同步至 BLE 设备。无需手动调用 HTTP API，守护进程会自动检测 Agent 活动。
+
+### 支持的工具
+
+| 工具 | 存储路径 | 格式 |
+|------|----------|------|
+| Claude Code | `~/.claude/projects/<project>/<session>.jsonl` | JSONL |
+| Codex CLI | `~/.codex/sessions/YYYY/MM/DD/<session>.jsonl` | JSONL |
+| OpenCode | `~/.local/share/opencode/history/` | JSONL（best-effort） |
+
+### 状态推断规则
+
+| 检测条件 | 推断状态 |
+|----------|----------|
+| 消息含 write_file/edit_file 等工具调用 | CODING |
+| 消息含 run_command/bash + test 关键词 | TESTING |
+| Assistant 纯文本消息（无工具调用） | THINKING |
+| 消息含 error/failed/exception | ERROR |
+| 超过 60 秒无新消息 | IDLE |
+
+### 配置
+
+| 参数 | 环境变量 | CLI 参数 | 默认值 | 说明 |
+|------|----------|----------|--------|------|
+| 启用监控 | `OPENWAIFUD_REALTIME_ENABLED` | `--no-realtime` | `true` | 设为 false 或使用 --no-realtime 禁用 |
+| 防抖延迟 | `OPENWAIFUD_REALTIME_DEBOUNCE_MS` | `--realtime-debounce` | `300` | 文件变化后等待时间（毫秒） |
+| 空闲超时 | — | — | `60` | 无新消息后标记为 IDLE 的秒数 |
+
+### 使用示例
+
+```bash
+# 默认启用 realtime（自动检测已安装的 Agent 工具）
+uv run openwaifud --ble-address AA:BB:CC:DD:EE:FF
+
+# 禁用 realtime，仅使用 HTTP API 模式
+uv run openwaifud --no-realtime
+
+# 自定义防抖延迟
+uv run openwaifud --realtime-debounce 500
+```
+
+### 工作原理
+
+1. 启动时扫描各工具目录，找到当前活跃的会话文件
+2. 使用 `watchdog` 监听文件系统事件（macOS 使用 FSEvents，Linux 使用 inotify）
+3. 文件变化后经过防抖（默认 300ms）避免读取写入中的文件
+4. 增量解析 JSONL 文件（仅读取新追加的行）
+5. 根据消息内容推断 Agent 状态，注入 StateManager 队列
+6. 通过 BLE 同步至 T5AI Board
+
+> **注意**：Realtime 模式与 HTTP API 模式可同时工作。HTTP API 的显式推送优先级高于 Realtime 推断。
+
 ## BLE 协议说明
 
 ### GATT Service / Characteristic

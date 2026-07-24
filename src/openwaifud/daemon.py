@@ -9,6 +9,7 @@ from loguru import logger
 from openwaifud.api.server import HTTPServer
 from openwaifud.ble.client import BLEClient
 from openwaifud.config import Config
+from openwaifud.realtime import RealtimeWatcher
 from openwaifud.state.manager import StateManager
 
 
@@ -24,6 +25,7 @@ class OpenWaifuDaemon:
             host=config.http_host,
             port=config.http_port,
         )
+        self._realtime_watcher = RealtimeWatcher(config, self._state_manager)
         self._shutdown_event = asyncio.Event()
 
     async def run(self) -> None:
@@ -55,6 +57,9 @@ class OpenWaifuDaemon:
         # Update BLE connection status in state manager
         self._state_manager.ble_connected = self._ble_client.connected
 
+        # Start realtime watcher
+        await self._realtime_watcher.start()
+
         # Start HTTP server
         await self._http_server.start()
 
@@ -69,10 +74,13 @@ class OpenWaifuDaemon:
         # 1. Stop HTTP server (no new requests)
         await self._http_server.stop()
 
-        # 2. Stop state consumer (drain queue with timeout)
+        # 2. Stop realtime watcher
+        await self._realtime_watcher.stop()
+
+        # 3. Stop state consumer (drain queue with timeout)
         await self._state_manager.stop_consumer()
 
-        # 3. Disconnect BLE
+        # 4. Disconnect BLE
         await self._ble_client.stop()
 
         logger.info("OpenWaifuD daemon stopped")

@@ -26,3 +26,12 @@ class Config:
 
     # State queue
     queue_max_size: int = 100
+
+    # Realtime file watching
+    realtime_enabled: bool = field(
+        default_factory=lambda: os.getenv("OPENWAIFUD_REALTIME_ENABLED", "true").lower() == "true"
+    )
+    realtime_debounce_ms: int = field(
+        default_factory=lambda: int(os.getenv("OPENWAIFUD_REALTIME_DEBOUNCE_MS", "300"))
+    )
+    realtime_idle_timeout: int = 60  # seconds before marking IDLE

@@ -8,6 +8,7 @@ dependencies = [
     "bleak>=0.21.0",
     "loguru>=0.7.0",
     "pydantic>=2.0.0",
+    "watchdog>=4.0.0",
 ]
 
 [project.optional-dependencies]
@@ -31,3 +32,10 @@ packages = ["src/openwaifud"]
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
 testpaths = ["tests"]
+
+[tool.ruff]
+line-length = 120
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B", "SIM", "ANN"]
+ignore = ["ANN101", "ANN102"]

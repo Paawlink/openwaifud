@@ -57,6 +57,18 @@ def parse_args() -> argparse.Namespace:
         choices=["DEBUG", "INFO", "WARNING", "ERROR"],
         help="Log level (default: INFO, env: OPENWAIFUD_LOG_LEVEL)",
     )
+    parser.add_argument(
+        "--no-realtime",
+        action="store_true",
+        default=False,
+        help="Disable realtime file watching (env: OPENWAIFUD_REALTIME_ENABLED=false)",
+    )
+    parser.add_argument(
+        "--realtime-debounce",
+        type=int,
+        default=None,
+        help="Realtime debounce in ms (default: 300, env: OPENWAIFUD_REALTIME_DEBOUNCE_MS)",
+    )
     return parser.parse_args()
 
 
@@ -71,6 +83,10 @@ def build_config(args: argparse.Namespace) -> Config:
         config.ble_address = args.ble_address
     if args.log_level is not None:
         config.log_level = args.log_level
+    if args.no_realtime:
+        config.realtime_enabled = False
+    if args.realtime_debounce is not None:
+        config.realtime_debounce_ms = args.realtime_debounce
     return config
 
 
