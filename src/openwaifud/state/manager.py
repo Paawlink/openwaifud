@@ -1,13 +1,14 @@
 """会话感知的异步状态管理器，带事件队列用于 BLE 同步。
 
-架构：
+架构（周期性全量同步）：
 - HTTP 处理器 / 实时监听器调用 :meth:`update_session`（或兼容包装
-  :meth:`update_status` / :meth:`update_context`）以上报某个会话的最新状态；
-- 内部维护一张 **活跃会话注册表**（``session_id -> _SessionRuntime``），每次变更
-  都会向队列投递一条会话命令（新增/更新/移除/清空）；
-- 后台消费者协程从队列取出命令并交给 BLE 发送回调；
-- 后台清扫器协程周期性地把“已完成后停留超时”或“长时间无更新”的会话移除；
-- 当前状态缓存在内存中，供 GET /api/v1/state 查询。
+  :meth:`update_status` / :meth:`update_context`）只更新内存中的 **活跃会话注册表**
+  （``session_id -> _SessionRuntime``），不做任何增量下发；
+- 后台清扫器协程周期性地把“已完成后停留超时”或“长时间无更新”的会话从注册表移除，
+  使注册表始终等于 GET /api/v1/state 的权威快照；
+- 后台全量同步协程每隔 ``sync_interval`` 秒，把当前注册表整帧下发给固件
+  （``B`` -> 全量 ``S`` -> ``E``），固件据此强制刷屏，使屏幕与权威状态完全一致；
+- 后台消费者协程从队列取出命令并交给 BLE 发送回调（串行写入）。
 """
 
 from __future__ import annotations
@@ -60,7 +61,7 @@ class StateManager:
         done_linger: float = 5.0,
         idle_timeout: float = 60.0,
         sweep_interval: float = 1.0,
-        reconcile_interval: float = 3.0,
+        sync_interval: float = 2.0,
     ) -> None:
         self._queue: asyncio.Queue[dict[str, Any]] = asyncio.Queue(maxsize=queue_max_size)
         self._sessions: dict[str, _SessionRuntime] = {}
@@ -70,13 +71,13 @@ class StateManager:
         self._start_time: datetime = datetime.now(UTC)
         self._consumer_task: asyncio.Task | None = None
         self._sweep_task: asyncio.Task | None = None
-        self._reconcile_task: asyncio.Task | None = None
+        self._sync_task: asyncio.Task | None = None
         self._ble_callback: Callable[..., Coroutine] | None = None
 
         self._done_linger = done_linger
         self._idle_timeout = idle_timeout
         self._sweep_interval = sweep_interval
-        self._reconcile_interval = reconcile_interval
+        self._sync_interval = sync_interval
 
     @property
     def ble_connected(self) -> bool:
@@ -100,7 +101,7 @@ class StateManager:
         current_task: str | None = None,
         error_message: str | None = None,
     ) -> None:
-        """新增或更新一个会话，并向 BLE 队列投递一条 upsert 命令。
+        """新增或更新一个会话（仅更新内存注册表，实际下发由周期性全量同步负责）。
 
         仅传入的（非 None）字段会被更新，便于状态与上下文分别到达时增量合并。
         """
@@ -134,7 +135,6 @@ class StateManager:
             session_id=rt.session_id,
             current_task=rt.current_task,
         )
-        await self._enqueue_upsert(rt, now)
 
     async def update_status(self, update: StatusUpdate) -> None:
         """（兼容接口）上报一次状态更新。
@@ -204,23 +204,20 @@ class StateManager:
         self._ble_callback = callback
 
     async def resync_ble(self) -> None:
-        """BLE（重）连接后重新同步：先清空，再逐个下发当前所有会话。"""
-        now = time.monotonic()
-        await self._enqueue({"type": "clear"})
-        for rt in self._sessions.values():
-            await self._enqueue_upsert(rt, now)
+        """BLE（重）连接后立即下发一帧完整快照，避免等待下一个同步周期。"""
+        await self._push_snapshot()
         logger.info(f"Resync BLE with {len(self._sessions)} active session(s)")
 
     async def start_consumer(self) -> None:
-        """启动后台消费者、清扫器与快照对账任务。"""
+        """启动后台消费者、清扫器与全量同步任务。"""
         self._consumer_task = asyncio.create_task(self._consume_loop())
         self._sweep_task = asyncio.create_task(self._sweep_loop())
-        self._reconcile_task = asyncio.create_task(self._reconcile_loop())
+        self._sync_task = asyncio.create_task(self._full_sync_loop())
         logger.info("State consumer started")
 
     async def stop_consumer(self) -> None:
         """优雅停止后台任务。"""
-        for task in (self._consumer_task, self._sweep_task, self._reconcile_task):
+        for task in (self._consumer_task, self._sweep_task, self._sync_task):
             if task and not task.done():
                 task.cancel()
                 with suppress(asyncio.CancelledError):
@@ -290,7 +287,6 @@ class StateManager:
             self._sessions.pop(sid, None)
             if self._last_session_id == sid:
                 self._last_session_id = None
-            await self._enqueue({"type": "session_remove", "data": sid})
             logger.debug(f"Session expired and removed: {sid}")
 
     def _is_expired(self, rt: _SessionRuntime, now: float) -> bool:
@@ -299,26 +295,26 @@ class StateManager:
             return True
         return (now - rt.updated_at) >= self._idle_timeout
 
-    async def _reconcile_loop(self) -> None:
-        """周期性快照对账：把权威状态（api/v1/state）整体下发给固件。
+    async def _full_sync_loop(self) -> None:
+        """周期性全量同步：每隔 ``sync_interval`` 秒把整帧快照下发给固件。
 
-        增量 ``S``/``X`` 命令可能因瞬时断连或 FIFO 溢出而丢失，导致屏幕残留
-        已消失的旧会话。本循环按 ``B`` -> 全量 ``S`` -> ``E`` 下发当前所有活跃会话，
-        固件据此把列表收敛到与状态完全一致（删除本轮未再出现的会话）。
+        不做任何增量或省流优化：无论状态是否变化，都按 ``B`` -> 全量 ``S`` -> ``E``
+        下发当前所有会话，固件据此强制刷屏，使屏幕始终等于权威状态。
         """
-        logger.debug("Reconcile loop running")
+        logger.debug("Full-sync loop running")
         try:
             while True:
-                await asyncio.sleep(self._reconcile_interval)
-                await self._reconcile_once()
+                await asyncio.sleep(self._sync_interval)
+                await self._push_snapshot()
         except asyncio.CancelledError:
-            logger.debug("Reconcile loop cancelled")
+            logger.debug("Full-sync loop cancelled")
             raise
 
-    async def _reconcile_once(self) -> None:
-        """下发一次完整快照（仅在 BLE 已连接时，否则重连时的 resync 会处理）。"""
-        if not self._ble_connected:
-            return
+    async def _push_snapshot(self) -> None:
+        """下发一帧完整快照（``B`` -> 全量 ``S`` -> ``E``）。
+
+        未连接时消费者会在发送环节自动丢弃，故此处不做连接判断，保持逻辑简单。
+        """
         now = time.monotonic()
         await self._enqueue({"type": "sync_begin"})
         for rt in self._sessions.values():
