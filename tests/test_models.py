@@ -5,7 +5,14 @@ from datetime import datetime
 import pytest
 from pydantic import ValidationError
 
-from openwaifud.models import AgentStatus, ConversationContext, DaemonState, StatusUpdate
+from openwaifud.models import (
+    AgentStatus,
+    ConversationContext,
+    DaemonState,
+    GlobalEvent,
+    GlobalEventKind,
+    StatusUpdate,
+)
 
 
 class TestAgentStatus:
@@ -86,6 +93,36 @@ class TestConversationContext:
         """ConversationContext without session_id raises ValidationError."""
         with pytest.raises(ValidationError):
             ConversationContext.model_validate({"plugin_type": "opencode"})
+
+
+class TestGlobalEvent:
+    """Tests for GlobalEventKind / GlobalEvent（泳道 2）。"""
+
+    def test_kind_enum_values(self):
+        assert GlobalEventKind.ERROR == "error"
+        assert GlobalEventKind.CANCEL == "cancel"
+        assert len(GlobalEventKind) == 2
+
+    def test_create_with_defaults(self):
+        ev = GlobalEvent(event=GlobalEventKind.CANCEL)
+        assert ev.event == GlobalEventKind.CANCEL
+        assert ev.session_id is None
+        assert ev.message is None
+        assert isinstance(ev.timestamp, datetime)
+
+    def test_create_with_all_fields(self):
+        ev = GlobalEvent(event=GlobalEventKind.ERROR, session_id="s1", message="boom")
+        assert ev.event == GlobalEventKind.ERROR
+        assert ev.session_id == "s1"
+        assert ev.message == "boom"
+
+    def test_invalid_event_raises_validation_error(self):
+        with pytest.raises(ValidationError):
+            GlobalEvent.model_validate({"event": "nope"})
+
+    def test_missing_event_raises_validation_error(self):
+        with pytest.raises(ValidationError):
+            GlobalEvent.model_validate({"session_id": "s1"})
 
 
 class TestDaemonState:

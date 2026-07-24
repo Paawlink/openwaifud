@@ -1,20 +1,20 @@
 """Tests for openwaifud.ble.protocol (session command-line protocol)."""
 
 from openwaifud.ble.protocol import (
-    CMD_CLEAR,
-    CMD_REMOVE,
+    CMD_GLOBAL,
     CMD_UPSERT,
     DEVICE_NAME,
+    GLOBAL_EVENT_CHARS,
     MAX_PAYLOAD,
     SERVICE_UUID,
     STATUS_CHARS,
     WRITE_CHAR_UUID,
-    encode_clear,
-    encode_session_remove,
+    encode_global_event,
     encode_session_upsert,
+    global_event_char,
     status_char,
 )
-from openwaifud.models import AgentStatus
+from openwaifud.models import AgentStatus, GlobalEventKind
 
 
 class TestGattIdentifiers:
@@ -46,20 +46,45 @@ class TestStatusChars:
         assert status_char(AgentStatus.IDLE) == "I"
 
 
-class TestEncodeClear:
-    def test_clear(self):
-        assert encode_clear().decode("utf-8") == CMD_CLEAR
+class TestGlobalEventChars:
+    """全局事件码映射（泳道 2）。"""
+
+    def test_all_kinds_have_chars(self):
+        for kind in GlobalEventKind:
+            assert kind in GLOBAL_EVENT_CHARS
+            assert len(GLOBAL_EVENT_CHARS[kind]) == 1
+
+    def test_global_event_char_values(self):
+        assert global_event_char(GlobalEventKind.ERROR) == "E"
+        assert global_event_char(GlobalEventKind.CANCEL) == "X"
 
 
-class TestEncodeRemove:
-    def test_remove(self):
-        line = encode_session_remove("abc123").decode("utf-8")
-        assert line == f"{CMD_REMOVE}|abc123"
+class TestEncodeGlobalEvent:
+    def test_error_fields(self):
+        line = encode_global_event(GlobalEventKind.ERROR, "构建失败").decode("utf-8")
+        parts = line.split("|", 2)
+        assert parts[0] == CMD_GLOBAL
+        assert parts[1] == "E"
+        assert parts[2] == "构建失败"
 
-    def test_remove_sanitizes_separator(self):
-        line = encode_session_remove("a|b").decode("utf-8")
-        # sid 中的分隔符被替换为空格，避免破坏解析
-        assert line == f"{CMD_REMOVE}|a b"
+    def test_cancel_char_mapping(self):
+        line = encode_global_event(GlobalEventKind.CANCEL).decode("utf-8")
+        parts = line.split("|", 2)
+        assert parts[1] == "X"
+        # 无详情时 detail 段为空
+        assert parts[2] == ""
+
+    def test_detail_separator_sanitized(self):
+        line = encode_global_event(GlobalEventKind.ERROR, "a|b\nc").decode("utf-8")
+        parts = line.split("|", 2)
+        # detail 中的分隔符/换行被替换为空格，因此 split 后正好 3 段
+        assert parts[2] == "a b c"
+
+    def test_long_detail_truncated_within_limit(self):
+        data = encode_global_event(GlobalEventKind.ERROR, "错" * 300)
+        assert len(data) <= MAX_PAYLOAD
+        # 截断后仍是合法 UTF-8（未切断多字节字符）
+        data.decode("utf-8")
 
 
 class TestEncodeUpsert:

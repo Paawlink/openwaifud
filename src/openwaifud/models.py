@@ -19,6 +19,26 @@ class AgentStatus(StrEnum):
     ERROR = "error"
 
 
+class GlobalEventKind(StrEnum):
+    """全局事件类型（泳道 2：独立于会话列表的即时通知）。"""
+
+    ERROR = "error"
+    CANCEL = "cancel"
+
+
+class GlobalEvent(BaseModel):
+    """来自 IDE 插件的全局事件（会话出错 / 被用户取消等）。
+
+    与会话列表（泳道 1）不同，全局事件走独立的事件流，由守护进程即时中继到
+    设备端，用于驱动屏幕左下角的全局状态机（瞬时展示后自动回落）。
+    """
+
+    event: GlobalEventKind
+    session_id: str | None = None
+    message: str | None = None
+    timestamp: datetime = Field(default_factory=lambda: datetime.now(UTC))
+
+
 class StatusUpdate(BaseModel):
     """Status update request from IDE plugin."""
 

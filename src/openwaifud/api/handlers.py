@@ -6,7 +6,7 @@ from aiohttp import web
 from loguru import logger
 from pydantic import ValidationError
 
-from openwaifud.models import ConversationContext, StatusUpdate
+from openwaifud.models import ConversationContext, GlobalEvent, StatusUpdate
 from openwaifud.state.manager import StateManager
 
 
@@ -15,6 +15,7 @@ def setup_routes(app: web.Application, state_manager: StateManager) -> None:
     handlers = APIHandlers(state_manager)
     app.router.add_post("/api/v1/status", handlers.handle_status)
     app.router.add_post("/api/v1/context", handlers.handle_context)
+    app.router.add_post("/api/v1/event", handlers.handle_event)
     app.router.add_get("/api/v1/state", handlers.handle_state)
     app.router.add_get("/api/v1/health", handlers.handle_health)
 
@@ -74,6 +75,32 @@ class APIHandlers:
 
         return web.json_response(
             {"success": True, "session_id": context.session_id},
+            status=200,
+        )
+
+    async def handle_event(self, request: web.Request) -> web.Response:
+        """POST /api/v1/event - 接收全局事件（泳道 2：出错 / 被用户取消等）。"""
+        try:
+            data = await request.json()
+        except Exception:
+            return web.json_response(
+                {"error": "Invalid JSON body"},
+                status=400,
+            )
+
+        try:
+            event = GlobalEvent(**data)
+        except ValidationError as e:
+            return web.json_response(
+                {"error": "Validation failed", "details": e.errors()},
+                status=422,
+            )
+
+        await self._state_manager.emit_global_event(event.event, event.message)
+        logger.debug(f"Global event received: {event.event.value}")
+
+        return web.json_response(
+            {"success": True, "event": event.event.value},
             status=200,
         )
 

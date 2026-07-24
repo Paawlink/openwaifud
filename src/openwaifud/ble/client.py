@@ -27,14 +27,13 @@ from loguru import logger
 
 from openwaifud.ble.protocol import (
     WRITE_CHAR_UUID,
-    encode_clear,
-    encode_session_remove,
+    encode_global_event,
     encode_session_upsert,
     encode_sync_begin,
     encode_sync_end,
 )
 from openwaifud.config import Config
-from openwaifud.models import AgentStatus
+from openwaifud.models import AgentStatus, GlobalEventKind
 
 
 class BLEClient:
@@ -100,10 +99,12 @@ class BLEClient:
                     plugin_type=data.get("plugin_type", "agent"),
                     task=task,
                 )
-            elif msg_type == "session_remove":
-                payload = encode_session_remove(message["data"])
-            elif msg_type == "clear":
-                payload = encode_clear()
+            elif msg_type == "global_event":
+                data = message["data"]
+                payload = encode_global_event(
+                    kind=GlobalEventKind(data["kind"]),
+                    detail=data.get("detail", ""),
+                )
             elif msg_type == "sync_begin":
                 payload = encode_sync_begin()
             elif msg_type == "sync_end":

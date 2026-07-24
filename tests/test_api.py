@@ -74,6 +74,50 @@ class TestContextEndpoint:
         assert data["session_id"] == "test-session-123"
 
 
+class TestEventEndpoint:
+    """Tests for POST /api/v1/event（泳道 2：全局事件）。"""
+
+    async def test_valid_event_returns_200(self, client):
+        """POST /api/v1/event with valid data returns 200."""
+        cli = await client
+        resp = await cli.post(
+            "/api/v1/event",
+            json={"event": "error", "session_id": "s1", "message": "boom"},
+        )
+        assert resp.status == 200
+        data = await resp.json()
+        assert data["success"] is True
+        assert data["event"] == "error"
+
+    async def test_cancel_event_returns_200(self, client):
+        """cancel 事件同样被接受。"""
+        cli = await client
+        resp = await cli.post("/api/v1/event", json={"event": "cancel"})
+        assert resp.status == 200
+        data = await resp.json()
+        assert data["event"] == "cancel"
+
+    async def test_invalid_json_returns_400(self, client):
+        """POST /api/v1/event with invalid JSON returns 400."""
+        cli = await client
+        resp = await cli.post(
+            "/api/v1/event",
+            data=b"not json",
+            headers={"Content-Type": "application/json"},
+        )
+        assert resp.status == 400
+        data = await resp.json()
+        assert "error" in data
+
+    async def test_invalid_field_returns_422(self, client):
+        """POST /api/v1/event with invalid event value returns 422."""
+        cli = await client
+        resp = await cli.post("/api/v1/event", json={"event": "nope"})
+        assert resp.status == 422
+        data = await resp.json()
+        assert data["error"] == "Validation failed"
+
+
 class TestStateEndpoint:
     """Tests for GET /api/v1/state."""
 

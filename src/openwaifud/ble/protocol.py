@@ -1,34 +1,35 @@
-"""BLE 会话协议：将 Agent 会话状态编码为固件可解析的命令行，写入 Write 特征。
+"""BLE 命令行协议：把守护进程侧状态编码为固件可解析的单行命令，写入 Write 特征。
 
-设计目标（与 OpenWaifu 固件一致）：固件屏幕不再是“历史消息滚动列表”，而是一块
-**实时会话看板**——每个活跃会话固定占用一行/一张卡片，随会话状态机变化更新，
-会话结束后整行移除。为此本模块把守护进程侧的会话变化编码为紧凑的单行命令：
+同一条 Write 通道上复用两条**泳道**，按命令前缀区分，职责互不重叠：
+
+泳道 1 · 会话列表全量快照（屏幕主体的实时会话看板）——守护进程每隔
+``sync_interval`` 秒按 ``B`` -> 逐个 ``S`` 全量会话 -> ``E`` 的顺序下发当前所有
+活跃会话，固件据此把屏幕列表**收敛到与 api/v1/state 完全一致**（快照对账，无需
+依赖增量命令的可靠送达，也不会清屏闪烁）。
+
+泳道 2 · 全局事件推送（独立于列表的即时通知）——会话出错 / 被用户取消等
+值得关注的事件通过 ``G`` 命令**事件驱动地即时下发**（不参与全量轮询），
+驱动固件屏幕左下角的全局状态机（瞬时展示后自动回落）。
 
 命令格式（UTF-8，单行，不含换行，长度 <= :data:`MAX_PAYLOAD` 字节）：
 
-======  =====================================  ================================
-命令    格式                                    含义
-======  =====================================  ================================
-清空    ``C``                                  清空固件端所有会话（连接/重连时下发）
-移除    ``X|<sid>``                             移除某个会话行（完成 / 中止）
+======  =========================================  ================================
+命令    格式                                        含义
+======  =========================================  ================================
+开始    ``B``                                      快照同步开始（固件把现有会话标记为“未见”）
 更新    ``S|<sid>|<st>|<elapsed>|<plugin>|<task>``  新增或更新一个会话
-开始    ``B``                                  快照同步开始（固件把现有会话标记为“未见”）
-结束    ``E``                                  快照同步结束（固件移除本轮未再出现的会话）
-======  =====================================  ================================
+结束    ``E``                                      快照同步结束（固件移除本轮未再出现的会话）
+事件    ``G|<ev>|<detail>``                        全局事件（``ev`` 见 :data:`GLOBAL_EVENT_CHARS`）
+======  =========================================  ================================
 
 其中 ``<st>`` 为单字符状态码（见 :data:`STATUS_CHARS`），``<elapsed>`` 为该会话
-已运行的整数秒数（固件收到后在本地按秒继续跳动）。字段以 ``|`` 分隔，因此 ``sid``
-与 ``task`` 中的 ``|``、换行等字符会在编码前被替换为空格。
-
-``B``/``E`` 用于**周期性快照对账**：守护进程按 ``B`` -> 逐个 ``S`` 全量会话 -> ``E``
-的顺序下发当前 :func:`~openwaifud.state.manager.StateManager.get_current_state` 的
-活跃会话，固件据此把屏幕列表**收敛到与 api/v1/state 完全一致**，无需依赖增量
-``X`` 的可靠送达即可删除已消失的旧会话（且不会像 ``C`` 那样清屏闪烁）。
+已运行的整数秒数（固件收到后在本地按秒继续跳动）。字段以 ``|`` 分隔，因此
+``sid`` / ``task`` / ``detail`` 中的 ``|``、换行等字符会在编码前被替换为空格。
 """
 
 from __future__ import annotations
 
-from openwaifud.models import AgentStatus
+from openwaifud.models import AgentStatus, GlobalEventKind
 
 # ---------------------------------------------------------------------------
 # 设备与 GATT 标识（须与固件 apps/openwaifu 保持一致）
@@ -44,10 +45,9 @@ MAX_PAYLOAD: int = 240
 # 字段分隔符与命令前缀
 FIELD_SEP = "|"
 CMD_UPSERT = "S"
-CMD_REMOVE = "X"
-CMD_CLEAR = "C"
 CMD_SYNC_BEGIN = "B"
 CMD_SYNC_END = "E"
+CMD_GLOBAL = "G"
 
 # AgentStatus -> 单字符状态码（固件据此显示中文标签与配色）
 STATUS_CHARS: dict[AgentStatus, str] = {
@@ -56,6 +56,12 @@ STATUS_CHARS: dict[AgentStatus, str] = {
     AgentStatus.TESTING: "V",
     AgentStatus.ERROR: "E",
     AgentStatus.IDLE: "I",
+}
+
+# GlobalEventKind -> 单字符事件码（``G`` 前缀命名空间隔离，不与会话命令冲突）
+GLOBAL_EVENT_CHARS: dict[GlobalEventKind, str] = {
+    GlobalEventKind.ERROR: "E",
+    GlobalEventKind.CANCEL: "X",
 }
 
 
@@ -94,6 +100,11 @@ def status_char(status: AgentStatus) -> str:
     return STATUS_CHARS.get(status, "I")
 
 
+def global_event_char(kind: GlobalEventKind) -> str:
+    """返回全局事件对应的单字符事件码，未知事件回退为出错 ``E``。"""
+    return GLOBAL_EVENT_CHARS.get(kind, "E")
+
+
 def _encode_line(text: str) -> bytes:
     """将整行命令编码为 UTF-8，超长时按字符边界安全截断。"""
     payload = text.encode("utf-8")
@@ -107,11 +118,6 @@ def _encode_line(text: str) -> bytes:
 # ---------------------------------------------------------------------------
 
 
-def encode_clear() -> bytes:
-    """编码“清空全部会话”命令。"""
-    return _encode_line(CMD_CLEAR)
-
-
 def encode_sync_begin() -> bytes:
     """编码“快照同步开始”命令：固件把现有会话标记为“未见”。"""
     return _encode_line(CMD_SYNC_BEGIN)
@@ -122,10 +128,22 @@ def encode_sync_end() -> bytes:
     return _encode_line(CMD_SYNC_END)
 
 
-def encode_session_remove(session_id: str) -> bytes:
-    """编码“移除某个会话”命令。"""
-    sid = _sanitize(session_id)
-    return _encode_line(f"{CMD_REMOVE}{FIELD_SEP}{sid}")
+def encode_global_event(kind: GlobalEventKind, detail: str = "") -> bytes:
+    """编码“全局事件”命令（泳道 2）。
+
+    格式：``G|<ev>|<detail>``。先构造固定字段前缀，再用剩余字节预算容纳（可能
+    较长的）详情文本，确保整行 UTF-8 编码后不超过 :data:`MAX_PAYLOAD`。
+    """
+    ev = global_event_char(kind)
+    prefix = f"{CMD_GLOBAL}{FIELD_SEP}{ev}{FIELD_SEP}"
+    budget = MAX_PAYLOAD - len(prefix.encode("utf-8"))
+    if budget <= 0:
+        return _encode_line(prefix)
+
+    detail_bytes = _sanitize(detail).encode("utf-8")
+    if len(detail_bytes) > budget:
+        detail_bytes = detail_bytes[:budget].decode("utf-8", errors="ignore").encode("utf-8")
+    return prefix.encode("utf-8") + detail_bytes
 
 
 def encode_session_upsert(

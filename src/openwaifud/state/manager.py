@@ -27,6 +27,7 @@ from openwaifud.models import (
     AgentStatus,
     ConversationContext,
     DaemonState,
+    GlobalEventKind,
     SessionInfo,
     StatusUpdate,
 )
@@ -155,6 +156,20 @@ class StateManager:
             plugin_type=context.plugin_type,
             current_task=context.current_task,
         )
+
+    async def emit_global_event(self, event: GlobalEventKind, message: str | None = None) -> None:
+        """发起一次全局事件（泳道 2）：立即入队，事件驱动地即时下发给固件。
+
+        与会话列表（泳道 1）互不干扰——全局事件不进入全量快照循环，也不改变
+        任何会话注册表状态；固件收到后驱动左下角全局状态机（瞬时展示后自动回落）。
+        """
+        await self._enqueue(
+            {
+                "type": "global_event",
+                "data": {"kind": event, "detail": message or ""},
+            }
+        )
+        logger.debug(f"Global event emitted: {event}")
 
     # ------------------------------------------------------------------
     # 查询
