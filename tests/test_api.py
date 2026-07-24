@@ -97,6 +97,14 @@ class TestEventEndpoint:
         data = await resp.json()
         assert data["event"] == "cancel"
 
+    async def test_done_event_returns_200(self, client):
+        """正常完成可由上报端显式发送 done 事件。"""
+        cli = await client
+        resp = await cli.post("/api/v1/event", json={"event": "done", "session_id": "s1"})
+        assert resp.status == 200
+        data = await resp.json()
+        assert data["event"] == "done"
+
     async def test_invalid_json_returns_400(self, client):
         """POST /api/v1/event with invalid JSON returns 400."""
         cli = await client

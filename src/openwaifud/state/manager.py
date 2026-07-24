@@ -129,13 +129,12 @@ class StateManager:
         rt.error_message = error_message
         rt.updated_at = now
 
-        # 任意一次上报都视为活跃；仅当最终状态为 IDLE 时标记为“已完成/待移除”。
+        # IDLE 只表示会话已结束并待移除；成功、取消和错误都会走这条清理路径，
+        # 因此完成动画必须由上报端通过显式 DONE 事件触发。
         if rt.status == AgentStatus.IDLE:
             if not rt.done:
                 rt.done = True
                 rt.done_since = now
-                # 任务完成时即时下发 DONE 全局事件，驱动固件 Celebration 形象
-                await self.emit_global_event(GlobalEventKind.DONE, rt.current_task)
         else:
             rt.done = False
             rt.done_since = None
