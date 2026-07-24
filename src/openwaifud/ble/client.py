@@ -3,9 +3,11 @@
 from __future__ import annotations
 
 import asyncio
+from contextlib import suppress
 from typing import Any
 
-from bleak import BleakClient, BleakError
+from bleak import BleakClient
+from bleak.exc import BleakError
 from loguru import logger
 
 from openwaifud.ble.protocol import (
@@ -54,10 +56,8 @@ class BLEClient:
         self._should_run = False
         if self._reconnect_task and not self._reconnect_task.done():
             self._reconnect_task.cancel()
-            try:
+            with suppress(asyncio.CancelledError):
                 await self._reconnect_task
-            except asyncio.CancelledError:
-                pass
         await self._disconnect()
 
     async def handle_message(self, message: dict[str, Any]) -> None:
@@ -74,9 +74,7 @@ class BLEClient:
             msg_type = message.get("type")
             if msg_type == "status":
                 update: StatusUpdate = message["data"]
-                await self._write_status(
-                    update.status, error_code=1 if update.status == AgentStatus.ERROR else 0
-                )
+                await self._write_status(update.status, error_code=1 if update.status == AgentStatus.ERROR else 0)
             elif msg_type == "context":
                 context: ConversationContext = message["data"]
                 await self._write_context(context)

@@ -43,12 +43,12 @@ class TestStatusUpdate:
     def test_invalid_status_raises_validation_error(self):
         """StatusUpdate with invalid status raises ValidationError."""
         with pytest.raises(ValidationError):
-            StatusUpdate(status="invalid_status")
+            StatusUpdate.model_validate({"status": "invalid_status"})
 
     def test_invalid_type_raises_validation_error(self):
         """StatusUpdate with wrong type for status raises ValidationError."""
         with pytest.raises(ValidationError):
-            StatusUpdate(status=12345)
+            StatusUpdate.model_validate({"status": 12345})
 
 
 class TestConversationContext:
@@ -80,12 +80,12 @@ class TestConversationContext:
     def test_missing_plugin_type_raises_validation_error(self):
         """ConversationContext without plugin_type raises ValidationError."""
         with pytest.raises(ValidationError):
-            ConversationContext(session_id="abc-123")
+            ConversationContext.model_validate({"session_id": "abc-123"})
 
     def test_missing_session_id_raises_validation_error(self):
         """ConversationContext without session_id raises ValidationError."""
         with pytest.raises(ValidationError):
-            ConversationContext(plugin_type="opencode")
+            ConversationContext.model_validate({"plugin_type": "opencode"})
 
 
 class TestDaemonState:

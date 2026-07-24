@@ -29,10 +29,8 @@ class StatusExtractor:
         tool_names_lower = {t.lower() for t in result.tool_names}
 
         # Check for error indicators
-        if any(kw in content_lower for kw in _ERROR_KEYWORDS):
-            # Only mark ERROR if it's from assistant reporting an error
-            if result.last_role == "assistant":
-                return AgentStatus.ERROR
+        if result.last_role == "assistant" and any(kw in content_lower for kw in _ERROR_KEYWORDS):
+            return AgentStatus.ERROR
 
         # Check tool use
         if result.has_tool_use:

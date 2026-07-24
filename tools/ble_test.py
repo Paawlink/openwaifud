@@ -27,6 +27,8 @@ import asyncio
 import sys
 
 from bleak import BleakClient, BleakScanner
+from bleak.backends.characteristic import BleakGATTCharacteristic
+from bleak.backends.device import BLEDevice
 
 DEVICE_NAME = "OpenWaifu"
 SERVICE_UUID = "0000fd50-0000-1000-0880-00805f9b34fb"
@@ -34,7 +36,7 @@ WRITE_CHAR_UUID = "00000001-0000-1001-8001-00805f9b07d0"
 MAX_PAYLOAD = 240
 
 
-async def find_device(name: str, timeout: float = 10.0):
+async def find_device(name: str, timeout: float = 10.0) -> BLEDevice | None:
     print(f'[*] Scanning for BLE device "{name}"...')
     device = await BleakScanner.find_device_by_name(name, timeout=timeout)
     if device is None:
@@ -46,7 +48,7 @@ async def find_device(name: str, timeout: float = 10.0):
     return device
 
 
-def pick_write_char(client: BleakClient):
+def pick_write_char(client: BleakClient) -> BleakGATTCharacteristic | None:
     target = WRITE_CHAR_UUID.lower()
     for service in client.services:
         for char in service.characteristics:

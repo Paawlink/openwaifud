@@ -6,6 +6,7 @@ import argparse
 import asyncio
 import signal
 import sys
+from contextlib import suppress
 
 from loguru import logger
 
@@ -110,10 +111,8 @@ def main() -> None:
 
     logger.info("OpenWaifuD starting...")
 
-    try:
+    with suppress(KeyboardInterrupt):
         asyncio.run(async_main(config))
-    except KeyboardInterrupt:
-        pass  # Already handled by signal handler
 
     logger.info("Goodbye!")
 

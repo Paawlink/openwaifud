@@ -63,9 +63,7 @@ class OpenWaifuDaemon:
         # Start HTTP server
         await self._http_server.start()
 
-        logger.info(
-            f"OpenWaifuD running - HTTP: http://{self._config.http_host}:{self._config.http_port}"
-        )
+        logger.info(f"OpenWaifuD running - HTTP: http://{self._config.http_host}:{self._config.http_port}")
 
     async def _stop(self) -> None:
         """Stop all components gracefully."""

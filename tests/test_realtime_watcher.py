@@ -1,10 +1,12 @@
 """Tests for openwaifud.realtime.watcher."""
 
 import json
+from typing import Any, cast
 
 import pytest
 
 from openwaifud.config import Config
+from openwaifud.realtime.parsers import ClaudeCodeParser
 from openwaifud.realtime.watcher import RealtimeWatcher
 from openwaifud.state.manager import StateManager
 
@@ -46,7 +48,7 @@ class TestRealtimeWatcherNoDirs:
         watcher = RealtimeWatcher(enabled_config, state_mgr)
         # Point all parsers to non-existent dirs
         for parser in watcher._parsers:
-            parser._base_dir = tmp_path / "nonexistent"
+            cast(Any, parser)._base_dir = tmp_path / "nonexistent"
 
         await watcher.start()
         # Observer is None since no paths were scheduled
@@ -62,6 +64,7 @@ class TestRealtimeWatcherIntegration:
         watcher = RealtimeWatcher(enabled_config, state_mgr)
         # Point Claude Code parser to tmp_path
         claude_parser = watcher._parsers[0]
+        assert isinstance(claude_parser, ClaudeCodeParser)
         claude_parser._base_dir = tmp_path
 
         # Create a session file
@@ -100,6 +103,7 @@ class TestRealtimeWatcherIntegration:
         """Watcher tracks file offset for incremental parsing."""
         watcher = RealtimeWatcher(enabled_config, state_mgr)
         claude_parser = watcher._parsers[0]
+        assert isinstance(claude_parser, ClaudeCodeParser)
         claude_parser._base_dir = tmp_path
 
         session_file = tmp_path / "offset-test.jsonl"

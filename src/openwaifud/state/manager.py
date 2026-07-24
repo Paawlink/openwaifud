@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 from collections.abc import Callable, Coroutine
+from contextlib import suppress
 from datetime import UTC, datetime
 from typing import Any
 
@@ -76,10 +77,8 @@ class StateManager:
         """Stop the consumer task gracefully."""
         if self._consumer_task and not self._consumer_task.done():
             self._consumer_task.cancel()
-            try:
+            with suppress(asyncio.CancelledError):
                 await self._consumer_task
-            except asyncio.CancelledError:
-                pass
         logger.info("State consumer stopped")
 
     async def _enqueue(self, message: dict[str, Any]) -> None:

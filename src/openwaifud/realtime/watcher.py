@@ -3,11 +3,14 @@
 from __future__ import annotations
 
 import asyncio
+import os
+from collections.abc import Callable
 from pathlib import Path
 
 from loguru import logger
 from watchdog.events import FileSystemEvent, FileSystemEventHandler
 from watchdog.observers import Observer
+from watchdog.observers.api import BaseObserver
 
 from openwaifud.config import Config
 from openwaifud.realtime.extractors import StatusExtractor
@@ -23,7 +26,7 @@ from openwaifud.state.manager import StateManager
 class _JSONLFileHandler(FileSystemEventHandler):
     """Watchdog event handler that forwards .jsonl file changes to asyncio loop."""
 
-    def __init__(self, loop: asyncio.AbstractEventLoop, callback) -> None:
+    def __init__(self, loop: asyncio.AbstractEventLoop, callback: Callable[[Path], None]) -> None:
         super().__init__()
         self._loop = loop
         self._callback = callback
@@ -32,13 +35,13 @@ class _JSONLFileHandler(FileSystemEventHandler):
         if event.is_directory:
             return
         if str(event.src_path).endswith(".jsonl"):
-            self._loop.call_soon_threadsafe(self._callback, Path(event.src_path))
+            self._loop.call_soon_threadsafe(self._callback, Path(os.fsdecode(event.src_path)))
 
     def on_created(self, event: FileSystemEvent) -> None:
         if event.is_directory:
             return
         if str(event.src_path).endswith(".jsonl"):
-            self._loop.call_soon_threadsafe(self._callback, Path(event.src_path))
+            self._loop.call_soon_threadsafe(self._callback, Path(os.fsdecode(event.src_path)))
 
 
 class RealtimeWatcher:
@@ -56,7 +59,7 @@ class RealtimeWatcher:
             CodexParser(),
             OpenCodeParser(),
         ]
-        self._observer: Observer | None = None
+        self._observer: BaseObserver | None = None
         self._offsets: dict[Path, int] = {}
         self._debounce_tasks: dict[Path, asyncio.TimerHandle] = {}
         self._running = False
@@ -71,7 +74,8 @@ class RealtimeWatcher:
         loop = asyncio.get_running_loop()
 
         # Create watchdog observer
-        self._observer = Observer()
+        observer = Observer()
+        self._observer = observer
         handler = _JSONLFileHandler(loop, self._on_file_event)
 
         # Register watch paths from each parser
@@ -79,7 +83,7 @@ class RealtimeWatcher:
         for parser in self._parsers:
             for watch_path in parser.get_watch_paths():
                 try:
-                    self._observer.schedule(handler, str(watch_path), recursive=True)
+                    observer.schedule(handler, str(watch_path), recursive=True)
                     watch_count += 1
                     logger.debug(f"Watching: {watch_path}")
                 except Exception as e:
@@ -91,7 +95,7 @@ class RealtimeWatcher:
             return
 
         # Start observer thread
-        self._observer.start()
+        observer.start()
         logger.info(f"Realtime watcher started, monitoring {watch_count} path(s)")
 
         # Initial scan for active sessions
