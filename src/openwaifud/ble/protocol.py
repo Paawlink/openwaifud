@@ -69,6 +69,7 @@ STATUS_CHARS: dict[AgentStatus, str] = {
 GLOBAL_EVENT_CHARS: dict[GlobalEventKind, str] = {
     GlobalEventKind.ERROR: "E",
     GlobalEventKind.CANCEL: "X",
+    GlobalEventKind.DONE: "D",
 }
 
 

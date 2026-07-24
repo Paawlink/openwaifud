@@ -18,7 +18,7 @@ class Config:
     ble_address: str = field(default_factory=lambda: os.getenv("OPENWAIFUD_BLE_ADDRESS", ""))
     # 未配置地址时，按设备名扫描连接（与固件广播名一致）
     ble_device_name: str = field(default_factory=lambda: os.getenv("OPENWAIFUD_BLE_DEVICE_NAME", "OpenWaifu"))
-    ble_scan_timeout: float = 10.0
+    ble_scan_timeout: float = 5.0  # 与重连间隔匹配，避免单轮扫描拖长实际重试节奏
     ble_connect_timeout: float = 10.0
     ble_write_timeout: float = 5.0
     ble_reconnect_interval: float = 5.0

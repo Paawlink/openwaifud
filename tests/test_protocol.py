@@ -62,6 +62,7 @@ class TestGlobalEventChars:
     def test_global_event_char_values(self):
         assert global_event_char(GlobalEventKind.ERROR) == "E"
         assert global_event_char(GlobalEventKind.CANCEL) == "X"
+        assert global_event_char(GlobalEventKind.DONE) == "D"
 
 
 class TestEncodeGlobalEvent:
@@ -78,6 +79,13 @@ class TestEncodeGlobalEvent:
         assert parts[1] == "X"
         # 无详情时 detail 段为空
         assert parts[2] == ""
+
+    def test_done_char_mapping(self):
+        line = encode_global_event(GlobalEventKind.DONE, "重构完成").decode("utf-8")
+        parts = line.split("|", 2)
+        assert parts[0] == CMD_GLOBAL
+        assert parts[1] == "D"
+        assert parts[2] == "重构完成"
 
     def test_detail_separator_sanitized(self):
         line = encode_global_event(GlobalEventKind.ERROR, "a|b\nc").decode("utf-8")

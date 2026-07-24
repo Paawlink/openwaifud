@@ -134,6 +134,8 @@ class StateManager:
             if not rt.done:
                 rt.done = True
                 rt.done_since = now
+                # 任务完成时即时下发 DONE 全局事件，驱动固件 Celebration 形象
+                await self.emit_global_event(GlobalEventKind.DONE, rt.current_task)
         else:
             rt.done = False
             rt.done_since = None
@@ -414,6 +416,9 @@ class StateManager:
         按顺序发送：错误信息 -> 元数据条目 -> 聊天消息。每种 kind 独立
         使用 0-based 序号（seq），固件端据此写入对应槽位。每轮全量同步
         时固件会在 S 命令处重置详情数据，因此 D 命令是全量重建。
+
+        元数据和聊天消息分别截断为固件槽位上限（8 / 12），避免发送
+        固件无法存储的多余条目、白白占用 BLE 队列。
         """
         sid = rt.session_id
         # 错误信息（kind=0，seq=0）
@@ -426,8 +431,8 @@ class StateManager:
                 "text": rt.error_message or "",
             },
         })
-        # 元数据条目（kind=1，seq 从 0 开始）
-        for i, (key, value) in enumerate(rt.metadata.items()):
+        # 元数据条目（kind=1，seq 从 0 开始，最多 8 条）
+        for i, (key, value) in enumerate(list(rt.metadata.items())[:8]):
             text = f"{key}: {value}"
             await self._enqueue({
                 "type": "session_detail",
@@ -438,8 +443,9 @@ class StateManager:
                     "text": text,
                 },
             })
-        # 聊天消息（kind=2，seq 从 0 开始）
-        for i, msg in enumerate(rt.chat_context):
+        # 聊天消息（kind=2，seq 从 0 开始，最多 12 条，取最近的）
+        recent_chat = list(rt.chat_context[-12:])
+        for i, msg in enumerate(recent_chat):
             text = f"{msg.role}: {msg.content}"
             await self._enqueue({
                 "type": "session_detail",

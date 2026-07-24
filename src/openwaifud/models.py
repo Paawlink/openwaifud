@@ -24,6 +24,7 @@ class GlobalEventKind(StrEnum):
 
     ERROR = "error"
     CANCEL = "cancel"
+    DONE = "done"
 
 
 class GlobalEvent(BaseModel):

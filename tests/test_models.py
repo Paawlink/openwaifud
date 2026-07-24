@@ -104,7 +104,8 @@ class TestGlobalEvent:
     def test_kind_enum_values(self):
         assert GlobalEventKind.ERROR == "error"
         assert GlobalEventKind.CANCEL == "cancel"
-        assert len(GlobalEventKind) == 2
+        assert GlobalEventKind.DONE == "done"
+        assert len(GlobalEventKind) == 3
 
     def test_create_with_defaults(self):
         ev = GlobalEvent(event=GlobalEventKind.CANCEL)
