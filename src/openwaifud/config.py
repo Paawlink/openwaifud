@@ -30,22 +30,10 @@ class Config:
     # State queue
     queue_max_size: int = 100
 
-    # Realtime file watching
-    realtime_enabled: bool = field(
-        default_factory=lambda: os.getenv("OPENWAIFUD_REALTIME_ENABLED", "true").lower() == "true"
-    )
-    realtime_debounce_ms: int = field(default_factory=lambda: int(os.getenv("OPENWAIFUD_REALTIME_DEBOUNCE_MS", "300")))
-    realtime_idle_timeout: int = 60  # seconds before marking IDLE
-    # 轮询兜底间隔（秒）。watchdog/FSEvents 对 SQLite WAL 写入不可靠，
-    # 因此额外按此间隔轮询各解析器的活跃会话；<=0 关闭轮询。
-    realtime_poll_interval: float = field(
-        default_factory=lambda: float(os.getenv("OPENWAIFUD_REALTIME_POLL_INTERVAL", "2.0"))
-    )
-
     # 会话生命周期（驱动固件端“情绪”状态机）
     # 会话完成/空闲后先停留展示“✓完成”多少秒，再从列表移除
     session_done_linger: float = 5.0
-    # 待命会话多久无更新则自动移除（秒），默认与 realtime_idle_timeout 一致
+    # 待命会话多久无更新则自动移除（秒）
     session_idle_timeout: float = 60.0
     # 会话清扫器轮询间隔（秒）
     session_sweep_interval: float = 1.0

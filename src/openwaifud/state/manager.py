@@ -60,6 +60,7 @@ class StateManager:
         done_linger: float = 5.0,
         idle_timeout: float = 60.0,
         sweep_interval: float = 1.0,
+        reconcile_interval: float = 3.0,
     ) -> None:
         self._queue: asyncio.Queue[dict[str, Any]] = asyncio.Queue(maxsize=queue_max_size)
         self._sessions: dict[str, _SessionRuntime] = {}
@@ -69,11 +70,13 @@ class StateManager:
         self._start_time: datetime = datetime.now(UTC)
         self._consumer_task: asyncio.Task | None = None
         self._sweep_task: asyncio.Task | None = None
+        self._reconcile_task: asyncio.Task | None = None
         self._ble_callback: Callable[..., Coroutine] | None = None
 
         self._done_linger = done_linger
         self._idle_timeout = idle_timeout
         self._sweep_interval = sweep_interval
+        self._reconcile_interval = reconcile_interval
 
     @property
     def ble_connected(self) -> bool:
@@ -209,14 +212,15 @@ class StateManager:
         logger.info(f"Resync BLE with {len(self._sessions)} active session(s)")
 
     async def start_consumer(self) -> None:
-        """启动后台消费者与清扫器任务。"""
+        """启动后台消费者、清扫器与快照对账任务。"""
         self._consumer_task = asyncio.create_task(self._consume_loop())
         self._sweep_task = asyncio.create_task(self._sweep_loop())
+        self._reconcile_task = asyncio.create_task(self._reconcile_loop())
         logger.info("State consumer started")
 
     async def stop_consumer(self) -> None:
         """优雅停止后台任务。"""
-        for task in (self._consumer_task, self._sweep_task):
+        for task in (self._consumer_task, self._sweep_task, self._reconcile_task):
             if task and not task.done():
                 task.cancel()
                 with suppress(asyncio.CancelledError):
@@ -294,3 +298,29 @@ class StateManager:
         if rt.done and rt.done_since is not None and (now - rt.done_since) >= self._done_linger:
             return True
         return (now - rt.updated_at) >= self._idle_timeout
+
+    async def _reconcile_loop(self) -> None:
+        """周期性快照对账：把权威状态（api/v1/state）整体下发给固件。
+
+        增量 ``S``/``X`` 命令可能因瞬时断连或 FIFO 溢出而丢失，导致屏幕残留
+        已消失的旧会话。本循环按 ``B`` -> 全量 ``S`` -> ``E`` 下发当前所有活跃会话，
+        固件据此把列表收敛到与状态完全一致（删除本轮未再出现的会话）。
+        """
+        logger.debug("Reconcile loop running")
+        try:
+            while True:
+                await asyncio.sleep(self._reconcile_interval)
+                await self._reconcile_once()
+        except asyncio.CancelledError:
+            logger.debug("Reconcile loop cancelled")
+            raise
+
+    async def _reconcile_once(self) -> None:
+        """下发一次完整快照（仅在 BLE 已连接时，否则重连时的 resync 会处理）。"""
+        if not self._ble_connected:
+            return
+        now = time.monotonic()
+        await self._enqueue({"type": "sync_begin"})
+        for rt in self._sessions.values():
+            await self._enqueue_upsert(rt, now)
+        await self._enqueue({"type": "sync_end"})

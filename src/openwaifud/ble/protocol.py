@@ -12,11 +12,18 @@
 清空    ``C``                                  清空固件端所有会话（连接/重连时下发）
 移除    ``X|<sid>``                             移除某个会话行（完成 / 中止）
 更新    ``S|<sid>|<st>|<elapsed>|<plugin>|<task>``  新增或更新一个会话
+开始    ``B``                                  快照同步开始（固件把现有会话标记为“未见”）
+结束    ``E``                                  快照同步结束（固件移除本轮未再出现的会话）
 ======  =====================================  ================================
 
 其中 ``<st>`` 为单字符状态码（见 :data:`STATUS_CHARS`），``<elapsed>`` 为该会话
 已运行的整数秒数（固件收到后在本地按秒继续跳动）。字段以 ``|`` 分隔，因此 ``sid``
 与 ``task`` 中的 ``|``、换行等字符会在编码前被替换为空格。
+
+``B``/``E`` 用于**周期性快照对账**：守护进程按 ``B`` -> 逐个 ``S`` 全量会话 -> ``E``
+的顺序下发当前 :func:`~openwaifud.state.manager.StateManager.get_current_state` 的
+活跃会话，固件据此把屏幕列表**收敛到与 api/v1/state 完全一致**，无需依赖增量
+``X`` 的可靠送达即可删除已消失的旧会话（且不会像 ``C`` 那样清屏闪烁）。
 """
 
 from __future__ import annotations
@@ -39,6 +46,8 @@ FIELD_SEP = "|"
 CMD_UPSERT = "S"
 CMD_REMOVE = "X"
 CMD_CLEAR = "C"
+CMD_SYNC_BEGIN = "B"
+CMD_SYNC_END = "E"
 
 # AgentStatus -> 单字符状态码（固件据此显示中文标签与配色）
 STATUS_CHARS: dict[AgentStatus, str] = {
@@ -101,6 +110,16 @@ def _encode_line(text: str) -> bytes:
 def encode_clear() -> bytes:
     """编码“清空全部会话”命令。"""
     return _encode_line(CMD_CLEAR)
+
+
+def encode_sync_begin() -> bytes:
+    """编码“快照同步开始”命令：固件把现有会话标记为“未见”。"""
+    return _encode_line(CMD_SYNC_BEGIN)
+
+
+def encode_sync_end() -> bytes:
+    """编码“快照同步结束”命令：固件移除本轮未再出现（仍为“未见”）的会话。"""
+    return _encode_line(CMD_SYNC_END)
 
 
 def encode_session_remove(session_id: str) -> bytes:

@@ -30,6 +30,8 @@ from openwaifud.ble.protocol import (
     encode_clear,
     encode_session_remove,
     encode_session_upsert,
+    encode_sync_begin,
+    encode_sync_end,
 )
 from openwaifud.config import Config
 from openwaifud.models import AgentStatus
@@ -102,6 +104,10 @@ class BLEClient:
                 payload = encode_session_remove(message["data"])
             elif msg_type == "clear":
                 payload = encode_clear()
+            elif msg_type == "sync_begin":
+                payload = encode_sync_begin()
+            elif msg_type == "sync_end":
+                payload = encode_sync_end()
             else:
                 logger.warning(f"Unknown message type: {msg_type}")
                 return
