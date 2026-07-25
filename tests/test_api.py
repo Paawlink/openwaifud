@@ -143,6 +143,37 @@ class TestStateEndpoint:
         assert data["ble_connected"] is False
 
 
+class TestStateResetEndpoint:
+    """Tests for POST /api/v1/state/reset."""
+
+    async def test_reset_clears_all_sessions(self, client):
+        """重置后会话列表为空，整体状态回到 idle。"""
+        cli = await client
+        await cli.post("/api/v1/status", json={"status": "coding", "session_id": "s1"})
+        await cli.post("/api/v1/status", json={"status": "thinking", "session_id": "s2"})
+
+        resp = await cli.post("/api/v1/state/reset")
+        assert resp.status == 200
+        data = await resp.json()
+        assert data["success"] is True
+        assert data["cleared_sessions"] == 2
+
+        state_resp = await cli.get("/api/v1/state")
+        state = await state_resp.json()
+        assert state["sessions"] == []
+        assert state["agent_status"] == "idle"
+        assert state["context"] is None
+
+    async def test_reset_with_no_sessions_returns_zero(self, client):
+        """无会话时重置也正常返回，清除数为 0。"""
+        cli = await client
+        resp = await cli.post("/api/v1/state/reset")
+        assert resp.status == 200
+        data = await resp.json()
+        assert data["success"] is True
+        assert data["cleared_sessions"] == 0
+
+
 class TestDetailEndpoint:
     """Tests for POST /api/v1/session/detail and GET /api/v1/session/{id}/detail."""
 

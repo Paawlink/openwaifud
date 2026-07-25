@@ -30,9 +30,9 @@ class Config:
     asr_language: str = field(default_factory=lambda: os.getenv("OPENWAIFUD_ASR_LANGUAGE", "zh"))
 
     # Local text-to-speech
-    tts_model_dir: str = field(default_factory=lambda: os.getenv("OPENWAIFUD_TTS_MODEL_DIR", ""))
-    tts_voice: str = field(default_factory=lambda: os.getenv("OPENWAIFUD_TTS_VOICE", "zf_001"))
-    tts_en_voice: str = field(default_factory=lambda: os.getenv("OPENWAIFUD_TTS_EN_VOICE", "af_heart"))
+    tts_language: str = field(default_factory=lambda: os.getenv("OPENWAIFUD_TTS_LANGUAGE", "ZH"))
+    tts_speaker: str = field(default_factory=lambda: os.getenv("OPENWAIFUD_TTS_SPEAKER", "ZH"))
+    tts_device: str = field(default_factory=lambda: os.getenv("OPENWAIFUD_TTS_DEVICE", "cpu"))
     tts_speed: float = field(default_factory=lambda: float(os.getenv("OPENWAIFUD_TTS_SPEED", "1.0")))
 
     # Logging

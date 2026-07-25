@@ -33,9 +33,9 @@ class OpenWaifuDaemon:
             details_provider=self._state_manager.list_session_details,
         )
         self._tts_service = TTSService(
-            model_dir=config.tts_model_dir,
-            voice=config.tts_voice,
-            en_voice=config.tts_en_voice,
+            language=config.tts_language,
+            speaker=config.tts_speaker,
+            device=config.tts_device,
             speed=config.tts_speed,
         )
         self._http_server = HTTPServer(

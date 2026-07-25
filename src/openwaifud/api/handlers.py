@@ -47,6 +47,7 @@ def setup_routes(
     app.router.add_put("/api/v1/chat/config", handlers.handle_chat_config_put)
     app.router.add_post("/api/v1/chat", handlers.handle_chat)
     app.router.add_get("/api/v1/state", handlers.handle_state)
+    app.router.add_post("/api/v1/state/reset", handlers.handle_state_reset)
     app.router.add_get("/api/v1/health", handlers.handle_health)
     app.router.add_get("/api/v1/devices", handlers.handle_devices)
 
@@ -262,6 +263,12 @@ class APIHandlers:
         """GET /api/v1/state - Get current daemon state."""
         state = self._state_manager.get_current_state()
         return web.json_response(state.model_dump(mode="json"))
+
+    async def handle_state_reset(self, request: web.Request) -> web.Response:
+        """POST /api/v1/state/reset - 清空守护进程内所有会话状态（网页端重置）。"""
+        cleared = await self._state_manager.reset()
+        logger.info(f"State reset via API: cleared {cleared} session(s)")
+        return web.json_response({"success": True, "cleared_sessions": cleared})
 
     async def handle_health(self, request: web.Request) -> web.Response:
         """GET /api/v1/health - Health check."""

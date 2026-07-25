@@ -194,6 +194,15 @@
   .form-msg.ok { color: var(--ok); }
   .form-msg.err { color: var(--err); }
 
+  /* ---------- 危险操作按钮 ---------- */
+  button.danger {
+    background: rgba(248, 113, 113, 0.12);
+    border: 1px solid rgba(248, 113, 113, 0.4);
+    color: var(--err);
+  }
+  button.danger:hover:not(:disabled) { background: rgba(248, 113, 113, 0.2); opacity: 1; }
+  .reset-row { display: flex; align-items: center; gap: 14px; flex-wrap: wrap; }
+
   /* ---------- 即时对话 ---------- */
   .chat-box {
     display: flex;
@@ -314,6 +323,14 @@
       <div class="card">
         <div id="devices"><p class="empty">加载中…</p></div>
       </div>
+      <div class="card">
+        <h2>重置状态</h2>
+        <p class="hint">清除守护进程中所有会话状态，硬件屏幕将同步清空。适用于插件异常退出后残留会话的情况。</p>
+        <div class="reset-row">
+          <button id="reset-state-btn" class="danger" type="button">重置状态</button>
+          <p id="reset-state-msg" class="form-msg"></p>
+        </div>
+      </div>
     </section>
 
     <!-- ========== 即时对话 ========== -->
@@ -430,6 +447,33 @@ async function refreshDevices() {
 
 refreshDevices();
 setInterval(refreshDevices, 2000);
+
+/* ---------- 重置状态 ---------- */
+
+document.getElementById("reset-state-btn").addEventListener("click", async () => {
+  if (!confirm("确定要清除守护进程中所有会话状态吗？硬件屏幕将同步清空。")) return;
+  const btn = document.getElementById("reset-state-btn");
+  const msg = document.getElementById("reset-state-msg");
+  btn.disabled = true;
+  msg.className = "form-msg";
+  msg.textContent = "重置中…";
+  try {
+    const resp = await fetch("/api/v1/state/reset", { method: "POST" });
+    const data = await resp.json();
+    if (resp.ok) {
+      msg.className = "form-msg ok";
+      msg.textContent = "已清除 " + (data.cleared_sessions || 0) + " 个会话";
+    } else {
+      msg.className = "form-msg err";
+      msg.textContent = data.error || ("重置失败（HTTP " + resp.status + "）");
+    }
+  } catch (e) {
+    msg.className = "form-msg err";
+    msg.textContent = "请求失败，请检查守护进程是否运行";
+  } finally {
+    btn.disabled = false;
+  }
+});
 
 /* ---------- 模型设置 ---------- */
 

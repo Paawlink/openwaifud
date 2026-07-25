@@ -24,7 +24,7 @@
 | HTTP 服务 | aiohttp |
 | BLE 通信 | bleak |
 | 本地语音识别 | faster-whisper（CPU int8） |
-| 本地语音合成 | kokoro-onnx 中文模型 |
+| 本地语音合成 | MeloTTS 多语言模型 |
 | 日志 | loguru |
 | 数据模型 | pydantic v2 |
 | 代码规范 | Ruff |
@@ -51,7 +51,7 @@ uv run openwaifud --port 9000 --log-level DEBUG
 uv run openwaifud --help
 ```
 
-支持环境变量配置：`OPENWAIFUD_HTTP_HOST`、`OPENWAIFUD_HTTP_PORT`、`OPENWAIFUD_BLE_ADDRESS`、`OPENWAIFUD_BLE_DEVICE_NAME`、`OPENWAIFUD_LOG_LEVEL`、`OPENWAIFUD_ASR_MODEL`、`OPENWAIFUD_ASR_LANGUAGE`、`OPENWAIFUD_TTS_MODEL_DIR`、`OPENWAIFUD_TTS_VOICE`、`OPENWAIFUD_TTS_EN_VOICE`、`OPENWAIFUD_TTS_SPEED`。CLI 参数优先级高于环境变量。
+支持环境变量配置：`OPENWAIFUD_HTTP_HOST`、`OPENWAIFUD_HTTP_PORT`、`OPENWAIFUD_BLE_ADDRESS`、`OPENWAIFUD_BLE_DEVICE_NAME`、`OPENWAIFUD_LOG_LEVEL`、`OPENWAIFUD_ASR_MODEL`、`OPENWAIFUD_ASR_LANGUAGE`、`OPENWAIFUD_TTS_LANGUAGE`、`OPENWAIFUD_TTS_SPEAKER`、`OPENWAIFUD_TTS_DEVICE`、`OPENWAIFUD_TTS_SPEED`。CLI 参数优先级高于环境变量。
 
 ## HTTP API 文档
 
@@ -247,13 +247,14 @@ BLE audio complete: stream=1, bytes=64000, duration=2.00s
 ASR recognized: "查看当前任务状态"
 ```
 
-识别文本随后交给内置 Agent 的 `ChatService`。Agent 回复由本地 `kokoro-onnx`
-中文模型合成为 16 kHz、16-bit、单声道 PCM，再通过 BLE Write 特征回传设备播放。
-默认声音为 `zf_001`；中文模型、voices 和 vocab 配置首次使用时下载到
-`~/.cache/openwaifud/tts`，也可以预先下载并通过 `OPENWAIFUD_TTS_MODEL_DIR` 指定目录。
+识别文本随后交给内置 Agent 的 `ChatService`。Agent 回复由本地 MeloTTS
+模型合成为 16 kHz、16-bit、单声道 PCM，再通过 BLE Write 特征回传设备播放。
+默认使用 `ZH` 模型和 `ZH` speaker，可直接合成中英文混合文本。模型首次使用时由
+MeloTTS 下载到 Hugging Face 缓存。默认使用 CPU，也可以通过 `OPENWAIFUD_TTS_DEVICE`
+选择 `mps` 或 `cuda`。
 
 ```bash
-OPENWAIFUD_TTS_VOICE=zf_001 OPENWAIFUD_TTS_SPEED=1.0 uv run openwaifud
+OPENWAIFUD_TTS_LANGUAGE=ZH OPENWAIFUD_TTS_SPEAKER=ZH OPENWAIFUD_TTS_SPEED=1.0 uv run openwaifud
 ```
 
 反向音频包使用 `OWT` 魔数，包括开始帧、带序号的 PCM 数据帧和结束帧。

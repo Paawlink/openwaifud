@@ -1,4 +1,4 @@
-"""Tests for the extensible Kokoro TTS service."""
+"""Tests for the MeloTTS service."""
 
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
@@ -9,56 +9,28 @@ from openwaifud.tts import SynthesizedAudio, TTSService
 
 
 def test_tts_resamples_and_converts_to_pcm():
-    class FakeG2P:
-        def __call__(self, text):
-            assert text == "你好"
-            return "phonemes", None
-
     class FakeEngine:
-        def create(self, phonemes, **kwargs):
-            assert phonemes == "phonemes"
-            assert kwargs == {"voice": "zf_001", "speed": 1.0, "is_phonemes": True}
-            return np.array([-1.0, 0.0, 1.0], dtype=np.float32), 24000
+        def tts_to_file(self, text, speaker_id, **kwargs):
+            assert text == "你好 OpenWaifu"
+            assert speaker_id == 0
+            assert kwargs == {"output_path": None, "speed": 1.0, "quiet": True}
+            return np.array([-1.0, 0.0, 1.0], dtype=np.float32)
 
     service = TTSService()
-    service._g2p = FakeG2P()
     service._engine = FakeEngine()
-    audio = service._synthesize_sync("你好")
+    service._speaker_id = 0
+    service._source_rate = 24000
+    audio = service._synthesize_sync("你好 OpenWaifu")
 
     samples = np.frombuffer(audio.pcm, dtype="<i2")
     assert audio.sample_rate == 16000
     assert samples.size == 2
     assert samples[0] == -32767
-
-
-def test_english_tts_uses_english_model_and_voice():
-    class FakeEngine:
-        def create(self, text, **kwargs):
-            assert text == "Hello, OpenWaifu!"
-            assert kwargs == {"voice": "af_heart", "speed": 1.0, "lang": "en-us"}
-            return np.array([0.0], dtype=np.float32), 16000
-
-    service = TTSService()
-    service._en_engine = FakeEngine()
-    audio = service._synthesize_sync("Hello, OpenWaifu!")
-
-    assert audio.pcm == b"\x00\x00"
-
-
-def test_chinese_g2p_preserves_english_words():
-    from misaki import zh
-
-    g2p = zh.ZHG2P(version="1.1", en_callable=lambda text: f"<{text}>")
-
-    phonemes, _ = g2p("你好 OpenWaifu TTS")
-
-    assert "<OpenWaifu TTS>" in phonemes
-
-
 async def test_tts_synthesize_uses_worker_thread():
     service = TTSService()
     service._engine = SimpleNamespace()
-    service._g2p = SimpleNamespace()
+    service._speaker_id = 0
+    service._source_rate = 22050
     service._synthesize_sync = lambda text: text
     assert await service.synthesize(" hello ") == "hello"
 
@@ -66,14 +38,24 @@ async def test_tts_synthesize_uses_worker_thread():
 async def test_tts_prepare_loads_model_once():
     service = TTSService()
     engine = SimpleNamespace()
-    g2p = SimpleNamespace()
-    with patch.object(service, "_prepare_sync", return_value=(engine, g2p)) as prepare_sync:
+    with patch.object(service, "_prepare_sync", return_value=(engine, 3, 22050)) as prepare_sync:
         await service.prepare()
         await service.prepare()
 
     prepare_sync.assert_called_once_with()
     assert service._engine is engine
-    assert service._g2p is g2p
+    assert service._speaker_id == 3
+    assert service._source_rate == 22050
+
+
+def test_tts_rejects_non_positive_speed():
+    for speed in (0, -1):
+        try:
+            TTSService(speed=speed)
+        except ValueError as error:
+            assert str(error) == "TTS speed must be greater than zero"
+        else:
+            raise AssertionError("non-positive TTS speed was accepted")
 
 
 async def test_daemon_voice_pipeline(config):

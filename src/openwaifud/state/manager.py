@@ -201,6 +201,20 @@ class StateManager:
         if rt.wall_started_at is None:
             rt.wall_started_at = now_wall
 
+    async def reset(self) -> int:
+        """清空所有会话状态，并立即下发一帧空快照让固件同步清屏。
+
+        清除会话注册表、最近会话记录和当前上下文；BLE 连接状态与启动时间
+        不受影响。返回被清除的会话数量。
+        """
+        count = len(self._sessions)
+        self._sessions.clear()
+        self._last_session_id = None
+        self._current_context = None
+        await self._push_snapshot()
+        logger.info(f"State reset: cleared {count} session(s)")
+        return count
+
     async def emit_global_event(self, event: GlobalEventKind, message: str | None = None) -> None:
         """发起一次全局事件（泳道 2）：立即入队，事件驱动地即时下发给固件。
 

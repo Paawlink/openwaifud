@@ -31,6 +31,25 @@ async def test_resync_targets_only_newly_connected_device(state_manager):
     assert all(message["target_device_id"] == "device-b" for message in messages)
 
 
+async def test_reset_clears_sessions_and_pushes_empty_snapshot(state_manager):
+    """reset 清空注册表后立即下发一帧空快照（仅 B -> E）。"""
+    await state_manager.update_session("s1", status=AgentStatus.CODING)
+    await state_manager.update_session("s2", status=AgentStatus.THINKING)
+
+    cleared = await state_manager.reset()
+
+    assert cleared == 2
+    state = state_manager.get_current_state()
+    assert state.sessions == []
+    assert state.agent_status == AgentStatus.IDLE
+    assert state.context is None
+
+    messages = []
+    while not state_manager._queue.empty():
+        messages.append(state_manager._queue.get_nowait())
+    assert [message["type"] for message in messages] == ["sync_begin", "sync_end"]
+
+
 async def test_full_queue_drops_state_before_tts_message(state_manager):
     for index in range(10):
         await state_manager._enqueue({"type": "session_upsert", "data": {"session_id": str(index)}})
