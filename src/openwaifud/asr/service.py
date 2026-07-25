@@ -85,13 +85,21 @@ class AudioStreamAssembler:
 
 
 class ASRService:
-    """Lazy local faster-whisper transcription service."""
+    """Preloadable local faster-whisper transcription service."""
 
-    def __init__(self, model_name: str = "small", language: str = "zh") -> None:
+    def __init__(self, model_name: str = "medium", language: str = "zh") -> None:
         self._model_name = model_name
         self._language = language
         self._model: WhisperModel | None = None
         self._model_lock = asyncio.Lock()
+
+    async def prepare(self) -> None:
+        """Load and warm up the model before the first real recording."""
+        async with self._model_lock:
+            if self._model is not None:
+                return
+            self._model = await asyncio.to_thread(self._load_model)
+            await asyncio.to_thread(self._warm_up_sync)
 
     async def transcribe(self, recording: AudioRecording) -> str:
         """Transcribe a complete recording without blocking the asyncio loop."""
@@ -104,10 +112,9 @@ class ASRService:
             )
             return ""
 
+        await self.prepare()
         async with self._model_lock:
-            if self._model is None:
-                self._model = await asyncio.to_thread(self._load_model)
-        text = await asyncio.to_thread(self._transcribe_sync, recording.pcm)
+            text = await asyncio.to_thread(self._transcribe_sync, recording.pcm)
         if recording.dropped_bytes:
             logger.warning(f"ASR input lost {recording.dropped_bytes} PCM bytes on device")
         logger.info(f'ASR recognized: "{text}"')
@@ -119,6 +126,20 @@ class ASRService:
         logger.info(f'Loading faster-whisper model "{self._model_name}" (CPU int8)')
         return WhisperModel(self._model_name, device="cpu", compute_type="int8")
 
+    def _warm_up_sync(self) -> None:
+        import numpy as np
+
+        logger.info(f'Warming up faster-whisper model "{self._model_name}"')
+        segments, _info = self._model.transcribe(
+            np.zeros(16000, dtype=np.float32),
+            language=self._language,
+            beam_size=1,
+            vad_filter=False,
+            condition_on_previous_text=False,
+        )
+        list(segments)
+        logger.info(f'faster-whisper model "{self._model_name}" is ready')
+
     def _transcribe_sync(self, pcm: bytes) -> str:
         import numpy as np
 
@@ -126,8 +147,21 @@ class ASRService:
         segments, _info = self._model.transcribe(
             audio,
             language=self._language,
-            beam_size=5,
+            task="transcribe",
+            beam_size=8,
+            best_of=8,
+            temperature=0.0,
             vad_filter=True,
+            vad_parameters={
+                "threshold": 0.35,
+                "min_speech_duration_ms": 100,
+                "min_silence_duration_ms": 300,
+                "speech_pad_ms": 300,
+            },
             condition_on_previous_text=False,
+            initial_prompt=(
+                "以下是简体中文语音指令，可能包含 OpenWaifu、Claude Code、Codex、"
+                "OpenCode、Qoder 和编程任务。"
+            ),
         )
         return "".join(segment.text for segment in segments).strip()

@@ -138,6 +138,7 @@ class BLEClient:
     async def start(self) -> None:
         """启动 BLE 客户端并尝试首次连接。"""
         self._should_run = True
+        await self._asr_service.prepare()
         await self._connect()
 
     async def stop(self) -> None:

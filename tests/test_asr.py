@@ -1,6 +1,7 @@
 """Tests for BLE audio assembly and local ASR conversion."""
 
 from types import SimpleNamespace
+from unittest.mock import patch
 
 import numpy as np
 
@@ -50,3 +51,25 @@ def test_asr_converts_pcm_to_float32():
     assert captured["audio"].dtype == np.float32
     np.testing.assert_allclose(captured["audio"], [-1.0, 0.0, 32767 / 32768])
     assert captured["kwargs"]["language"] == "zh"
+    assert captured["kwargs"]["beam_size"] == 8
+    assert captured["kwargs"]["vad_parameters"]["speech_pad_ms"] == 300
+
+
+async def test_asr_prepare_loads_and_warms_model_once():
+    calls = []
+
+    class FakeModel:
+        def transcribe(self, audio, **kwargs):
+            calls.append((audio, kwargs))
+            return iter(()), None
+
+    service = ASRService()
+    with patch.object(service, "_load_model", return_value=FakeModel()) as load_model:
+        await service.prepare()
+        await service.prepare()
+
+    load_model.assert_called_once_with()
+    assert len(calls) == 1
+    assert calls[0][0].dtype == np.float32
+    assert calls[0][0].size == 16000
+    assert calls[0][1]["beam_size"] == 1

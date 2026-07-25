@@ -227,12 +227,13 @@ python3 tools/mock_agent.py --status error --task "加载用户资料"
 `OWA` 魔数，通过开始帧、带序号的数据帧和结束帧组成一次录音。OpenWaifuD 会校验
 流 ID、数据帧序号和最终 PCM 长度；存在丢包或长度不一致时丢弃该次录音，不送入 ASR。
 
-完整录音由 `faster-whisper` 在本地 CPU 上以 INT8 模式识别，默认模型为 `small`，
-默认语言为中文。首次收到录音时才会加载模型；若本机没有模型缓存，会自动下载。
+完整录音由 `faster-whisper` 在本地 CPU 上以 INT8 模式识别，默认模型为 `medium`，
+默认语言为中文。守护进程启动时会加载并预热模型，避免第一次真实录音承担推理初始化开销；
+若本机没有模型缓存，会在启动阶段自动下载。
 
 ```bash
-# 可选：使用更小、更快的模型
-OPENWAIFUD_ASR_MODEL=tiny uv run openwaifud --log-level DEBUG
+# 可选：使用更小、更快的模型（识别准确率会下降）
+OPENWAIFUD_ASR_MODEL=small uv run openwaifud --log-level DEBUG
 
 # 可选：修改识别语言
 OPENWAIFUD_ASR_LANGUAGE=en uv run openwaifud --log-level DEBUG

@@ -24,7 +24,7 @@ class Config:
     ble_reconnect_interval: float = 5.0
 
     # Local speech recognition
-    asr_model: str = field(default_factory=lambda: os.getenv("OPENWAIFUD_ASR_MODEL", "small"))
+    asr_model: str = field(default_factory=lambda: os.getenv("OPENWAIFUD_ASR_MODEL", "medium"))
     asr_language: str = field(default_factory=lambda: os.getenv("OPENWAIFUD_ASR_LANGUAGE", "zh"))
 
     # Logging
