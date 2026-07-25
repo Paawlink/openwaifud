@@ -41,7 +41,7 @@ uv run openwaifud
 # 运行（带 BLE 设备，指定地址）
 uv run openwaifud --ble-address AA:BB:CC:DD:EE:FF
 
-# 运行（不指定地址时，自动按设备名 OpenWaifu 扫描连接）
+# 运行（不指定地址时，自动扫描并连接所有名为 OpenWaifu 的设备）
 uv run openwaifud
 
 # 自定义端口和日志
@@ -220,7 +220,7 @@ python3 tools/mock_agent.py --status error --task "加载用户资料"
 | Notify 特征 | `00000002-0000-1001-8001-00805f9b07d0` |
 | 编码 | UTF-8，单条命令最大 240 字节（超长按字符边界截断） |
 
-> 未配置 `--ble-address` 时，守护进程会按设备名 `OpenWaifu`（可用 `OPENWAIFUD_BLE_DEVICE_NAME` 覆盖）自动扫描连接，这在 macOS（地址为随机 UUID）上尤其方便。
+> 未配置 `--ble-address` 时，守护进程会持续扫描设备名 `OpenWaifu`（可用 `OPENWAIFUD_BLE_DEVICE_NAME` 覆盖），新设备出现后会立即尝试连接。扫描异常退出时会自动重启。每台设备拥有独立的写队列、重连任务和音频流；Agent 状态广播到全部已连接设备，语音回复只返回发起录音的设备。指定 `--ble-address` 时仍只连接该设备。
 
 ### 唤醒录音与 ASR
 

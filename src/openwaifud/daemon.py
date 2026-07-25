@@ -64,11 +64,13 @@ class OpenWaifuDaemon:
         """Initialize and start all components."""
         logger.info("Starting OpenWaifuD daemon...")
 
-        # Wire BLE callback into state manager
+        # Wire state output into the BLE device manager. Messages without a target
+        # are broadcast; reconnect snapshots carry the connection's device ID.
         self._state_manager.set_ble_callback(self._ble_client.handle_message)
-        # BLE（重）连接后由状态管理器重新同步会话看板
+        # BLE（重）连接后由状态管理器只重新同步刚连接的设备
         self._ble_client.set_on_connected(self._state_manager.resync_ble)
         self._ble_client.set_on_transcript(self._handle_voice_message)
+        self._ble_client.set_on_connection_changed(self._update_ble_status)
 
         # Start state consumer (background queue processing)
         await self._state_manager.start_consumer()
@@ -76,8 +78,7 @@ class OpenWaifuDaemon:
         # Start BLE client (connects if address configured)
         await self._ble_client.start()
 
-        # Update BLE connection status in state manager
-        self._state_manager.ble_connected = self._ble_client.connected
+        self._update_ble_status()
 
         # Start HTTP server
         await self._http_server.start()
@@ -123,14 +124,26 @@ class OpenWaifuDaemon:
         except Exception as e:
             logger.exception(f"{name} model preload failed; first use will retry: {e}")
 
-    async def _handle_voice_message(self, message: str) -> None:
+    def _update_ble_status(self) -> None:
+        self._state_manager.ble_connected = self._ble_client.connected
+
+    async def _handle_voice_message(self, device_id: str | None, message: str | None = None) -> None:
         """Run recognized speech through the internal Agent, TTS, and device speaker."""
+        # Accept the old one-argument callback shape for callers/tests predating
+        # multi-device voice routing.
+        if message is None:
+            message = device_id or ""
+            device_id = None
         logger.info(f'Voice message: "{message}"')
         try:
             reply = await self._chat_service.chat(message)
             logger.info(f'Agent voice reply: "{reply}"')
             audio = await self._tts_service.synthesize(reply)
-            if not await self._ble_client.send_tts_audio(audio):
+            if device_id is None:
+                sent = await self._ble_client.send_tts_audio(audio)
+            else:
+                sent = await self._ble_client.send_tts_audio(device_id, audio)
+            if not sent:
                 logger.error("Unable to send TTS audio to device")
         except (ChatNotConfiguredError, ChatUpstreamError) as e:
             logger.error(f"Voice Agent unavailable: {e}")

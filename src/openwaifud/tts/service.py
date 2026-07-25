@@ -66,7 +66,7 @@ class TTSService:
 
     def _prepare_sync(self) -> tuple[Kokoro, ZHG2P]:
         from kokoro_onnx import Kokoro
-        from misaki import zh
+        from misaki import en, zh
 
         self._model_dir.mkdir(parents=True, exist_ok=True)
         model = self._model_dir / "kokoro-v1.1-zh.onnx"
@@ -78,7 +78,8 @@ class TTSService:
 
         logger.info(f"Loading Kokoro TTS model from {model}")
         engine = Kokoro(str(model), str(voices), vocab_config=str(config))
-        g2p = zh.ZHG2P(version="1.1")
+        en_g2p = en.G2P(trf=False, british=False, fallback=None)
+        g2p = zh.ZHG2P(version="1.1", en_callable=lambda text: en_g2p(text)[0])
         if self._voice not in engine.get_voices():
             raise RuntimeError(f'Kokoro voice "{self._voice}" is not available')
         logger.info(f'Kokoro TTS ready: voice="{self._voice}", speed={self._speed}')

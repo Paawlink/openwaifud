@@ -1,7 +1,7 @@
 """Tests for the extensible Kokoro TTS service."""
 
 from types import SimpleNamespace
-from unittest.mock import patch
+from unittest.mock import AsyncMock, patch
 
 import numpy as np
 
@@ -29,6 +29,16 @@ def test_tts_resamples_and_converts_to_pcm():
     assert audio.sample_rate == 16000
     assert samples.size == 2
     assert samples[0] == -32767
+
+
+def test_chinese_g2p_preserves_english_words():
+    from misaki import zh
+
+    g2p = zh.ZHG2P(version="1.1", en_callable=lambda text: f"<{text}>")
+
+    phonemes, _ = g2p("你好 OpenWaifu TTS")
+
+    assert "<OpenWaifu TTS>" in phonemes
 
 
 async def test_tts_synthesize_uses_worker_thread():
@@ -80,3 +90,17 @@ async def test_daemon_voice_pipeline(config):
         ("tts", "任务正在运行"),
         ("ble", b"\x00\x00"),
     ]
+
+
+async def test_daemon_voice_pipeline_replies_to_origin_device(config):
+    from openwaifud.daemon import OpenWaifuDaemon
+
+    daemon = OpenWaifuDaemon(config)
+    daemon._chat_service.chat = AsyncMock(return_value="收到")
+    audio = SynthesizedAudio(b"\x00\x00")
+    daemon._tts_service.synthesize = AsyncMock(return_value=audio)
+    daemon._ble_client.send_tts_audio = AsyncMock(return_value=True)
+
+    await daemon._handle_voice_message("device-b", "你好")
+
+    daemon._ble_client.send_tts_audio.assert_awaited_once_with("device-b", audio)

@@ -22,6 +22,8 @@ class Config:
     ble_connect_timeout: float = 10.0
     ble_write_timeout: float = 5.0
     ble_reconnect_interval: float = 5.0
+    # 持续扫描异常退出后的重启间隔
+    ble_discovery_interval: float = 5.0
 
     # Local speech recognition
     asr_model: str = field(default_factory=lambda: os.getenv("OPENWAIFUD_ASR_MODEL", "medium"))
