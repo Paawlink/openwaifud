@@ -144,6 +144,19 @@ class ChatRequest(BaseModel):
     message: str = Field(..., min_length=1, max_length=4000, description="用户消息")
 
 
+class MockAgentConfig(BaseModel):
+    """网页端内置模拟 Agent 的临时运行参数。"""
+
+    enabled: bool = False
+    interval: float = Field(default=5.0, ge=0.1, le=300)
+    repeat: int = Field(default=0, ge=0, le=1000)
+    sessions: int = Field(default=1, ge=1, le=16)
+    task: str = Field(default="", max_length=200)
+    status: AgentStatus | None = None
+    error_message: str = Field(default="请求上游接口超时，重试 3 次后仍未恢复", max_length=500)
+    seed: int | None = None
+
+
 class DaemonState(BaseModel):
     """Current daemon state snapshot."""
 

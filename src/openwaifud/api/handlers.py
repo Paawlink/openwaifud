@@ -10,12 +10,14 @@ from loguru import logger
 from pydantic import ValidationError
 
 from openwaifud.chat import ChatNotConfiguredError, ChatService, ChatUpstreamError
+from openwaifud.mock_agent import MockAgentService
 from openwaifud.models import (
     ChatConfig,
     ChatRequest,
     ConversationContext,
     DetailUpdate,
     GlobalEvent,
+    MockAgentConfig,
     StatusUpdate,
 )
 from openwaifud.state.manager import StateManager
@@ -29,6 +31,7 @@ def setup_routes(
     state_manager: StateManager,
     ble_client: BLEClient | None = None,
     chat_service: ChatService | None = None,
+    mock_agent_service: MockAgentService | None = None,
 ) -> None:
     """Register all API routes.
 
@@ -36,7 +39,9 @@ def setup_routes(
         未提供时（如单元测试）相关接口返回空列表。
     :param chat_service: 即时对话服务（可选）。未提供时对话相关接口返回 503。
     """
-    handlers = APIHandlers(state_manager, ble_client, chat_service)
+    mock_agent_service = mock_agent_service or MockAgentService(state_manager)
+    handlers = APIHandlers(state_manager, ble_client, chat_service, mock_agent_service)
+    app.on_cleanup.append(lambda _: mock_agent_service.stop())
     app.router.add_get("/", handlers.handle_index)
     app.router.add_post("/api/v1/status", handlers.handle_status)
     app.router.add_post("/api/v1/context", handlers.handle_context)
@@ -46,6 +51,8 @@ def setup_routes(
     app.router.add_get("/api/v1/chat/config", handlers.handle_chat_config_get)
     app.router.add_put("/api/v1/chat/config", handlers.handle_chat_config_put)
     app.router.add_post("/api/v1/chat", handlers.handle_chat)
+    app.router.add_get("/api/v1/mock-agent/config", handlers.handle_mock_agent_config_get)
+    app.router.add_put("/api/v1/mock-agent/config", handlers.handle_mock_agent_config_put)
     app.router.add_get("/api/v1/state", handlers.handle_state)
     app.router.add_post("/api/v1/state/reset", handlers.handle_state_reset)
     app.router.add_get("/api/v1/health", handlers.handle_health)
@@ -60,10 +67,12 @@ class APIHandlers:
         state_manager: StateManager,
         ble_client: BLEClient | None = None,
         chat_service: ChatService | None = None,
+        mock_agent_service: MockAgentService | None = None,
     ) -> None:
         self._state_manager = state_manager
         self._ble_client = ble_client
         self._chat_service = chat_service
+        self._mock_agent_service = mock_agent_service
 
     async def handle_index(self, request: web.Request) -> web.Response:
         """GET / - 网页端设备管理页（蓝牙设备列表）。"""
@@ -258,6 +267,27 @@ class APIHandlers:
             return web.json_response({"error": str(e)}, status=502)
 
         return web.json_response({"reply": reply})
+
+    async def handle_mock_agent_config_get(self, request: web.Request) -> web.Response:
+        """GET /api/v1/mock-agent/config - 读取本次进程的模拟参数。"""
+        if self._mock_agent_service is None:
+            return web.json_response({"error": "模拟 Agent 服务未启用"}, status=503)
+        return web.json_response(self._mock_agent_service.get_config())
+
+    async def handle_mock_agent_config_put(self, request: web.Request) -> web.Response:
+        """PUT /api/v1/mock-agent/config - 应用临时参数并启停模拟任务。"""
+        if self._mock_agent_service is None:
+            return web.json_response({"error": "模拟 Agent 服务未启用"}, status=503)
+        try:
+            data = await request.json()
+        except Exception:
+            return web.json_response({"error": "Invalid JSON body"}, status=400)
+        try:
+            config = MockAgentConfig(**data)
+        except ValidationError as e:
+            return web.json_response({"error": "Validation failed", "details": e.errors()}, status=422)
+        await self._mock_agent_service.configure(config)
+        return web.json_response({"success": True, **self._mock_agent_service.get_config()})
 
     async def handle_state(self, request: web.Request) -> web.Response:
         """GET /api/v1/state - Get current daemon state."""

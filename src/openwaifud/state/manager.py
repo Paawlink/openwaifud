@@ -215,6 +215,17 @@ class StateManager:
         logger.info(f"State reset: cleared {count} session(s)")
         return count
 
+    async def remove_sessions(self, session_ids: set[str]) -> int:
+        """立即移除指定会话，供内置模拟器停用时做定向清理。"""
+        removed = sum(self._sessions.pop(session_id, None) is not None for session_id in session_ids)
+        if self._last_session_id in session_ids:
+            self._last_session_id = None
+        if self._current_context is not None and self._current_context.session_id in session_ids:
+            self._current_context = None
+        if removed:
+            await self._push_snapshot()
+        return removed
+
     async def emit_global_event(self, event: GlobalEventKind, message: str | None = None) -> None:
         """发起一次全局事件（泳道 2）：立即入队，事件驱动地即时下发给固件。
 

@@ -1,5 +1,7 @@
 """Tests for openwaifud.api (HTTP handlers)."""
 
+import asyncio
+
 import pytest
 from aiohttp import web
 
@@ -267,3 +269,79 @@ class TestDevicesEndpoint:
         assert resp.status == 200
         data = await resp.json()
         assert data["devices"] == []
+
+
+class TestMockAgentEndpoint:
+    """Tests for the in-memory Mock Agent controls."""
+
+    async def test_default_config_is_disabled(self, client):
+        cli = await client
+        resp = await cli.get("/api/v1/mock-agent/config")
+        assert resp.status == 200
+        data = await resp.json()
+        assert data == {
+            "enabled": False,
+            "interval": 5.0,
+            "repeat": 0,
+            "sessions": 1,
+            "task": "",
+            "status": None,
+            "error_message": "请求上游接口超时，重试 3 次后仍未恢复",
+            "seed": None,
+            "running": False,
+        }
+
+    async def test_enable_and_disable_mock_agent(self, client):
+        cli = await client
+        resp = await cli.put(
+            "/api/v1/mock-agent/config",
+            json={"enabled": True, "interval": 30, "repeat": 0, "sessions": 2, "task": "演示任务", "seed": 7},
+        )
+        assert resp.status == 200
+        data = await resp.json()
+        assert data["enabled"] is True
+        assert data["running"] is True
+        assert data["sessions"] == 2
+
+        resp = await cli.put(
+            "/api/v1/mock-agent/config",
+            json={"enabled": False, "interval": 3, "repeat": 2, "sessions": 1, "task": "", "seed": None},
+        )
+        assert resp.status == 200
+        data = await resp.json()
+        assert data["enabled"] is False
+        assert data["running"] is False
+
+    async def test_invalid_config_returns_422(self, client):
+        cli = await client
+        resp = await cli.put("/api/v1/mock-agent/config", json={"enabled": True, "sessions": 0})
+        assert resp.status == 422
+        data = await resp.json()
+        assert data["error"] == "Validation failed"
+
+    async def test_one_shot_error_publishes_session_detail(self, client):
+        cli = await client
+        resp = await cli.put(
+            "/api/v1/mock-agent/config",
+            json={
+                "enabled": True,
+                "status": "error",
+                "task": "模拟失败任务",
+                "error_message": "模拟上游失败",
+            },
+        )
+        assert resp.status == 200
+        await asyncio.sleep(0)
+
+        state_resp = await cli.get("/api/v1/state")
+        state = await state_resp.json()
+        assert len(state["sessions"]) == 1
+        session = state["sessions"][0]
+        assert session["status"] == "error"
+        assert session["current_task"] == "模拟失败任务"
+        assert session["error_message"] == "模拟上游失败"
+
+        detail_resp = await cli.get(f"/api/v1/session/{session['session_id']}/detail")
+        detail = await detail_resp.json()
+        assert detail["metadata"]["demo"] is True
+        assert detail["chat_context"][-1]["content"] == "模拟上游失败"

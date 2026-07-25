@@ -163,7 +163,7 @@
   /* ---------- 表单 ---------- */
   form { display: flex; flex-direction: column; gap: 14px; }
   label { font-size: 13px; color: var(--muted); }
-  input {
+  input, select {
     width: 100%;
     margin-top: 6px;
     padding: 11px 13px;
@@ -175,7 +175,27 @@
     outline: none;
     transition: border-color 0.15s, box-shadow 0.15s;
   }
-  input:focus { border-color: var(--accent); box-shadow: 0 0 0 3px rgba(124, 156, 255, 0.15); }
+  input:focus, select:focus { border-color: var(--accent); box-shadow: 0 0 0 3px rgba(124, 156, 255, 0.15); }
+  .form-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 14px; }
+  .switch-row {
+    display: flex; align-items: center; justify-content: space-between; gap: 16px;
+    padding-bottom: 14px; border-bottom: 1px solid var(--border);
+  }
+  .switch-copy strong { display: block; font-size: 14px; color: var(--text); margin-bottom: 3px; }
+  .switch-copy span { display: block; font-size: 12px; color: var(--muted); }
+  .switch { position: relative; width: 46px; height: 26px; flex-shrink: 0; }
+  .switch input { position: absolute; opacity: 0; width: 1px; height: 1px; margin: 0; }
+  .switch span {
+    position: absolute; inset: 0; border-radius: 999px; background: var(--bg-soft);
+    border: 1px solid var(--border); cursor: pointer; transition: background 0.15s, border-color 0.15s;
+  }
+  .switch span::after {
+    content: ""; position: absolute; width: 18px; height: 18px; left: 3px; top: 3px;
+    border-radius: 50%; background: var(--muted); transition: transform 0.15s, background 0.15s;
+  }
+  .switch input:checked + span { background: rgba(74, 222, 128, 0.18); border-color: rgba(74, 222, 128, 0.55); }
+  .switch input:checked + span::after { transform: translateX(20px); background: var(--ok); }
+  .runtime-note { font-size: 12px; color: var(--muted); line-height: 1.6; }
   button {
     padding: 11px 18px;
     border-radius: 10px;
@@ -282,6 +302,7 @@
     .sidebar-footer { display: none; }
     main { padding: 20px 16px 40px; }
     .chat-box { height: 60vh; }
+    .form-grid { grid-template-columns: 1fr; }
   }
 </style>
 </head>
@@ -350,6 +371,62 @@
         <form id="chat-form" class="chat-input-row">
           <input id="chat-input" maxlength="4000" autocomplete="off" placeholder="你好呀">
           <button id="chat-btn" type="submit">发送</button>
+        </form>
+      </div>
+      <div class="card">
+        <h2>模拟 Agent</h2>
+        <p class="hint">在守护进程内生成演示会话，用于调试网页和硬件状态展示。参数仅在本次运行中有效。</p>
+        <form id="mock-agent-form">
+          <div class="switch-row">
+            <div class="switch-copy">
+              <strong>启用模拟 Agent</strong>
+              <span id="mock-agent-status">当前已关闭</span>
+            </div>
+            <label class="switch" for="mock-agent-enabled">
+              <input id="mock-agent-enabled" type="checkbox">
+              <span></span>
+            </label>
+          </div>
+          <div class="form-grid">
+            <div>
+              <label for="mock-agent-status-mode">运行模式</label>
+              <select id="mock-agent-status-mode">
+                <option value="">循环演示场景</option>
+                <option value="idle">单次：空闲</option>
+                <option value="thinking">单次：思考</option>
+                <option value="coding">单次：编码</option>
+                <option value="testing">单次：测试</option>
+                <option value="error">单次：错误</option>
+              </select>
+            </div>
+            <div>
+              <label for="mock-agent-sessions">并发会话数（1-16）</label>
+              <input id="mock-agent-sessions" type="number" min="1" max="16" value="1">
+            </div>
+            <div>
+              <label for="mock-agent-interval">更新间隔（秒）</label>
+              <input id="mock-agent-interval" type="number" min="0.1" max="300" step="0.1" value="5">
+            </div>
+            <div>
+              <label for="mock-agent-repeat">每会话场景数（0 表示持续运行）</label>
+              <input id="mock-agent-repeat" type="number" min="0" max="1000" value="0">
+            </div>
+            <div>
+              <label for="mock-agent-seed">随机种子（可选）</label>
+              <input id="mock-agent-seed" type="number" step="1" placeholder="随机">
+            </div>
+          </div>
+          <div>
+            <label for="mock-agent-task">任务文本覆盖（可选）</label>
+            <input id="mock-agent-task" maxlength="200" autocomplete="off" placeholder="留空使用内置场景任务">
+          </div>
+          <div>
+            <label for="mock-agent-error-message">单次错误文本</label>
+            <input id="mock-agent-error-message" maxlength="500" autocomplete="off" value="请求上游接口超时，重试 3 次后仍未恢复">
+          </div>
+          <p class="runtime-note">应用参数会重启模拟任务。关闭时会清理模拟器创建的会话，不影响真实 Agent。</p>
+          <button id="mock-agent-btn" type="submit">应用参数</button>
+          <p id="mock-agent-msg" class="form-msg"></p>
         </form>
       </div>
     </section>
@@ -526,6 +603,71 @@ document.getElementById("chat-config-form").addEventListener("submit", async (ev
   }
 });
 
+/* ---------- 模拟 Agent ---------- */
+
+function renderMockAgentConfig(cfg) {
+  document.getElementById("mock-agent-enabled").checked = Boolean(cfg.enabled);
+  document.getElementById("mock-agent-sessions").value = cfg.sessions ?? 1;
+  document.getElementById("mock-agent-interval").value = cfg.interval ?? 5;
+  document.getElementById("mock-agent-repeat").value = cfg.repeat ?? 0;
+  document.getElementById("mock-agent-seed").value = cfg.seed ?? "";
+  document.getElementById("mock-agent-task").value = cfg.task || "";
+  document.getElementById("mock-agent-status-mode").value = cfg.status || "";
+  document.getElementById("mock-agent-error-message").value = cfg.error_message || "";
+  document.getElementById("mock-agent-status").textContent = cfg.running
+    ? "正在生成模拟会话"
+    : (cfg.enabled ? "任务已运行完毕" : "当前已关闭");
+}
+
+async function loadMockAgentConfig() {
+  try {
+    const resp = await fetch("/api/v1/mock-agent/config");
+    if (resp.ok) renderMockAgentConfig(await resp.json());
+  } catch (e) {
+    /* 守护进程未启动时保留默认值 */
+  }
+}
+
+document.getElementById("mock-agent-form").addEventListener("submit", async (ev) => {
+  ev.preventDefault();
+  const btn = document.getElementById("mock-agent-btn");
+  const msg = document.getElementById("mock-agent-msg");
+  const seed = document.getElementById("mock-agent-seed").value.trim();
+  btn.disabled = true;
+  msg.className = "form-msg";
+  msg.textContent = "应用中…";
+  try {
+    const resp = await fetch("/api/v1/mock-agent/config", {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        enabled: document.getElementById("mock-agent-enabled").checked,
+        sessions: Number(document.getElementById("mock-agent-sessions").value),
+        interval: Number(document.getElementById("mock-agent-interval").value),
+        repeat: Number(document.getElementById("mock-agent-repeat").value),
+        seed: seed === "" ? null : Number(seed),
+        task: document.getElementById("mock-agent-task").value.trim(),
+        status: document.getElementById("mock-agent-status-mode").value || null,
+        error_message: document.getElementById("mock-agent-error-message").value.trim(),
+      }),
+    });
+    const data = await resp.json();
+    if (resp.ok) {
+      renderMockAgentConfig(data);
+      msg.className = "form-msg ok";
+      msg.textContent = data.enabled ? "模拟 Agent 已启动" : "模拟 Agent 已关闭";
+    } else {
+      msg.className = "form-msg err";
+      msg.textContent = data.error || ("应用失败（HTTP " + resp.status + "）");
+    }
+  } catch (e) {
+    msg.className = "form-msg err";
+    msg.textContent = "请求失败，请检查守护进程是否运行";
+  } finally {
+    btn.disabled = false;
+  }
+});
+
 /* ---------- 即时对话（气泡样式） ---------- */
 
 function appendBubble(cls, text) {
@@ -575,6 +717,7 @@ document.getElementById("chat-form").addEventListener("submit", async (ev) => {
 });
 
 loadChatConfig();
+loadMockAgentConfig();
 </script>
 </body>
 </html>
