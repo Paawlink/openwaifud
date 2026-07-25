@@ -46,6 +46,9 @@ WiFi    ``W|<st>|<detail>``                             WiFi 状态（``st`` 见
 
 from __future__ import annotations
 
+import struct
+from dataclasses import dataclass
+
 from openwaifud.models import AgentStatus, GlobalEventKind
 
 # ---------------------------------------------------------------------------
@@ -59,6 +62,37 @@ NOTIFY_CHAR_UUID = "00000002-0000-1001-8001-00805f9b07d0"
 
 # 单条命令 UTF-8 编码后的最大字节数（与固件 OPENWAIFU_BLE_MAX_MSG_LEN 对齐）
 MAX_PAYLOAD: int = 240
+
+# 固件 Notify 回传的二进制音频协议
+AUDIO_MAGIC = b"OWA"
+AUDIO_PACKET_START = 1
+AUDIO_PACKET_DATA = 2
+AUDIO_PACKET_END = 3
+
+
+@dataclass(frozen=True)
+class AudioStartPacket:
+    stream_id: int
+    sample_rate: int
+    sample_bits: int
+    channels: int
+
+
+@dataclass(frozen=True)
+class AudioDataPacket:
+    stream_id: int
+    sequence: int
+    pcm: bytes
+
+
+@dataclass(frozen=True)
+class AudioEndPacket:
+    stream_id: int
+    pcm_bytes: int
+    dropped_bytes: int
+
+
+AudioPacket = AudioStartPacket | AudioDataPacket | AudioEndPacket
 
 # 字段分隔符与命令前缀
 FIELD_SEP = "|"
@@ -222,6 +256,43 @@ def parse_device_notification(payload: bytes) -> dict[str, str] | None:
         "status": status,
         "detail": parts[2] if len(parts) > 2 else "",
     }
+
+
+def parse_audio_notification(payload: bytes) -> AudioPacket | None:
+    """解析固件 Notify 回传的 ``OWA`` 二进制音频包。
+
+    非音频通知返回 ``None``；带 ``OWA`` 魔数但结构非法时抛出
+    :class:`BLEProtocolError`，以便调用方区分普通文本通知和损坏的音频帧。
+    """
+    if not payload.startswith(AUDIO_MAGIC):
+        return None
+    if len(payload) < 4:
+        raise BLEProtocolError("Truncated audio packet header")
+
+    packet_type = payload[3]
+    if packet_type == AUDIO_PACKET_START:
+        if len(payload) != 14:
+            raise BLEProtocolError(f"Invalid audio start packet length: {len(payload)}")
+        stream_id, sample_rate, sample_bits, channels, _reserved = struct.unpack_from("<IHBBH", payload, 4)
+        if sample_rate <= 0 or sample_bits != 16 or channels != 1:
+            raise BLEProtocolError(
+                f"Unsupported audio format: {sample_rate} Hz, {sample_bits}-bit, {channels} channel(s)"
+            )
+        return AudioStartPacket(stream_id, sample_rate, sample_bits, channels)
+
+    if packet_type == AUDIO_PACKET_DATA:
+        if len(payload) <= 10:
+            raise BLEProtocolError(f"Invalid audio data packet length: {len(payload)}")
+        stream_id, sequence = struct.unpack_from("<IH", payload, 4)
+        return AudioDataPacket(stream_id, sequence, payload[10:])
+
+    if packet_type == AUDIO_PACKET_END:
+        if len(payload) != 16:
+            raise BLEProtocolError(f"Invalid audio end packet length: {len(payload)}")
+        stream_id, pcm_bytes, dropped_bytes = struct.unpack_from("<III", payload, 4)
+        return AudioEndPacket(stream_id, pcm_bytes, dropped_bytes)
+
+    raise BLEProtocolError(f"Unknown audio packet type: {packet_type}")
 
 
 def encode_sync_begin() -> bytes:

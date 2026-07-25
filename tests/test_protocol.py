@@ -3,6 +3,10 @@
 import pytest
 
 from openwaifud.ble.protocol import (
+    AUDIO_MAGIC,
+    AUDIO_PACKET_DATA,
+    AUDIO_PACKET_END,
+    AUDIO_PACKET_START,
     CMD_DETAIL,
     CMD_GLOBAL,
     CMD_UPSERT,
@@ -17,6 +21,9 @@ from openwaifud.ble.protocol import (
     SERVICE_UUID,
     STATUS_CHARS,
     WRITE_CHAR_UUID,
+    AudioDataPacket,
+    AudioEndPacket,
+    AudioStartPacket,
     BLEProtocolError,
     encode_global_event,
     encode_session_detail,
@@ -24,6 +31,7 @@ from openwaifud.ble.protocol import (
     encode_wifi_forget,
     encode_wifi_provision,
     global_event_char,
+    parse_audio_notification,
     parse_device_notification,
     status_char,
 )
@@ -266,3 +274,29 @@ class TestParseNotificationEdgeCases:
     def test_empty_payload_returns_none(self):
         assert parse_device_notification(b"") is None
         assert parse_device_notification(b"   ") is None
+
+
+class TestParseAudioNotification:
+    def test_non_audio_returns_none(self):
+        assert parse_audio_notification(b"W|G|192.168.1.5") is None
+
+    def test_start_packet(self):
+        payload = AUDIO_MAGIC + bytes([AUDIO_PACKET_START]) + (7).to_bytes(4, "little")
+        payload += (16000).to_bytes(2, "little") + bytes([16, 1]) + b"\x00\x00"
+        assert parse_audio_notification(payload) == AudioStartPacket(7, 16000, 16, 1)
+
+    def test_data_packet(self):
+        payload = AUDIO_MAGIC + bytes([AUDIO_PACKET_DATA]) + (7).to_bytes(4, "little")
+        payload += (3).to_bytes(2, "little") + b"\x01\x02"
+        assert parse_audio_notification(payload) == AudioDataPacket(7, 3, b"\x01\x02")
+
+    def test_end_packet(self):
+        payload = AUDIO_MAGIC + bytes([AUDIO_PACKET_END]) + (7).to_bytes(4, "little")
+        payload += (100).to_bytes(4, "little") + (2).to_bytes(4, "little")
+        assert parse_audio_notification(payload) == AudioEndPacket(7, 100, 2)
+
+    def test_rejects_unsupported_format(self):
+        payload = AUDIO_MAGIC + bytes([AUDIO_PACKET_START]) + (7).to_bytes(4, "little")
+        payload += (8000).to_bytes(2, "little") + bytes([8, 2]) + b"\x00\x00"
+        with pytest.raises(BLEProtocolError):
+            parse_audio_notification(payload)

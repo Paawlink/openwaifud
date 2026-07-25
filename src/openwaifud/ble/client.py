@@ -27,9 +27,11 @@ from bleak.backends.device import BLEDevice
 from bleak.exc import BleakError
 from loguru import logger
 
+from openwaifud.asr import ASRService, AudioRecording, AudioStreamAssembler
 from openwaifud.ble.protocol import (
     NOTIFY_CHAR_UUID,
     WRITE_CHAR_UUID,
+    BLEProtocolError,
     encode_global_event,
     encode_session_detail,
     encode_session_upsert,
@@ -37,6 +39,7 @@ from openwaifud.ble.protocol import (
     encode_sync_end,
     encode_wifi_forget,
     encode_wifi_provision,
+    parse_audio_notification,
     parse_device_notification,
 )
 from openwaifud.config import Config
@@ -63,6 +66,9 @@ class BLEClient:
         # 固件经 Notify 特征回传的 WiFi 状态（unknown 表示尚未收到任何通知）
         self._wifi_status: str = "unknown"
         self._wifi_detail: str = ""
+        self._audio_assembler = AudioStreamAssembler()
+        self._asr_service = ASRService(model_name=config.asr_model, language=config.asr_language)
+        self._asr_tasks: set[asyncio.Task[str]] = set()
 
     @property
     def connected(self) -> bool:
@@ -142,6 +148,8 @@ class BLEClient:
             with suppress(asyncio.CancelledError):
                 await self._reconnect_task
         await self._disconnect()
+        if self._asr_tasks:
+            await asyncio.gather(*self._asr_tasks, return_exceptions=True)
 
     async def handle_message(self, message: dict[str, Any]) -> None:
         """处理来自 StateManager 队列的会话命令（注册为 BLE 回调）。
@@ -243,6 +251,7 @@ class BLEClient:
         self._write_char = None
         self._wifi_status = "unknown"
         self._wifi_detail = ""
+        self._audio_assembler.reset()
         logger.warning("BLE device disconnected unexpectedly")
         if self._should_run:
             self._schedule_reconnect()
@@ -334,14 +343,45 @@ class BLEClient:
 
     def _on_notification(self, char: BleakGATTCharacteristic, data: bytearray) -> None:
         """Notify 数据回调：解析固件回传的设备状态通知。"""
-        note = parse_device_notification(bytes(data))
+        payload = bytes(data)
+        try:
+            audio_packet = parse_audio_notification(payload)
+        except BLEProtocolError as e:
+            logger.warning(f"Invalid BLE audio notification: {e}")
+            self._audio_assembler.reset()
+            return
+
+        if audio_packet is not None:
+            recording = self._audio_assembler.push(audio_packet)
+            if recording is not None:
+                duration = len(recording.pcm) / (
+                    recording.sample_rate * recording.channels * recording.sample_bits / 8
+                )
+                logger.debug(
+                    f"BLE audio complete: stream={recording.stream_id}, "
+                    f"bytes={len(recording.pcm)}, duration={duration:.2f}s"
+                )
+                task = asyncio.create_task(self._transcribe_recording(recording))
+                self._asr_tasks.add(task)
+                task.add_done_callback(self._asr_tasks.discard)
+            return
+
+        note = parse_device_notification(payload)
         if note is None:
-            logger.debug(f"BLE notify (unrecognized): {bytes(data)!r}")
+            logger.debug(f"BLE notify (unrecognized): {payload!r}")
             return
         if note["type"] == "wifi_status":
             self._wifi_status = note["status"]
             self._wifi_detail = note["detail"]
             logger.info(f"Device WiFi status: {note['status']} {note['detail']}".rstrip())
+
+    async def _transcribe_recording(self, recording: AudioRecording) -> str:
+        """Run ASR while containing model download and inference failures."""
+        try:
+            return await self._asr_service.transcribe(recording)
+        except Exception as e:
+            logger.exception(f"ASR transcription failed: {e}")
+            return ""
 
     # ------------------------------------------------------------------
     # 写入

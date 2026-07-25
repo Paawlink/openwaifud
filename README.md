@@ -23,6 +23,7 @@
 | 包管理 | UV |
 | HTTP 服务 | aiohttp |
 | BLE 通信 | bleak |
+| 本地语音识别 | faster-whisper（CPU int8） |
 | 日志 | loguru |
 | 数据模型 | pydantic v2 |
 | 代码规范 | Ruff |
@@ -49,7 +50,7 @@ uv run openwaifud --port 9000 --log-level DEBUG
 uv run openwaifud --help
 ```
 
-支持环境变量配置：`OPENWAIFUD_HTTP_HOST`、`OPENWAIFUD_HTTP_PORT`、`OPENWAIFUD_BLE_ADDRESS`、`OPENWAIFUD_BLE_DEVICE_NAME`、`OPENWAIFUD_LOG_LEVEL`。CLI 参数优先级高于环境变量。
+支持环境变量配置：`OPENWAIFUD_HTTP_HOST`、`OPENWAIFUD_HTTP_PORT`、`OPENWAIFUD_BLE_ADDRESS`、`OPENWAIFUD_BLE_DEVICE_NAME`、`OPENWAIFUD_LOG_LEVEL`、`OPENWAIFUD_ASR_MODEL`、`OPENWAIFUD_ASR_LANGUAGE`。CLI 参数优先级高于环境变量。
 
 ## HTTP API 文档
 
@@ -215,9 +216,34 @@ python3 tools/mock_agent.py --status error --task "加载用户资料"
 | 设备广播名 | `OpenWaifu` |
 | Service | `0000fd50-0000-1000-0880-00805f9b34fb` |
 | Write 特征 | `00000001-0000-1001-8001-00805f9b07d0` |
+| Notify 特征 | `00000002-0000-1001-8001-00805f9b07d0` |
 | 编码 | UTF-8，单条命令最大 240 字节（超长按字符边界截断） |
 
 > 未配置 `--ble-address` 时，守护进程会按设备名 `OpenWaifu`（可用 `OPENWAIFUD_BLE_DEVICE_NAME` 覆盖）自动扫描连接，这在 macOS（地址为随机 UUID）上尤其方便。
+
+### 唤醒录音与 ASR
+
+固件识别到“你好涂鸦”后，通过 Notify 特征发送二进制 PCM 音频。音频包使用
+`OWA` 魔数，通过开始帧、带序号的数据帧和结束帧组成一次录音。OpenWaifuD 会校验
+流 ID、数据帧序号和最终 PCM 长度；存在丢包或长度不一致时丢弃该次录音，不送入 ASR。
+
+完整录音由 `faster-whisper` 在本地 CPU 上以 INT8 模式识别，默认模型为 `small`，
+默认语言为中文。首次收到录音时才会加载模型；若本机没有模型缓存，会自动下载。
+
+```bash
+# 可选：使用更小、更快的模型
+OPENWAIFUD_ASR_MODEL=tiny uv run openwaifud --log-level DEBUG
+
+# 可选：修改识别语言
+OPENWAIFUD_ASR_LANGUAGE=en uv run openwaifud --log-level DEBUG
+```
+
+收到完整音频后，调试日志会输出录音长度及识别文本：
+
+```text
+BLE audio complete: stream=1, bytes=64000, duration=2.00s
+ASR recognized: "查看当前任务状态"
+```
 
 ### 泳道 1 · 会话列表命令（全量快照）
 
