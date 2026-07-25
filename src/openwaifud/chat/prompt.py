@@ -6,12 +6,14 @@ Markdown 等任何排版符号。
 
 每次对话时把 daemon 的实时状态快照（:class:`~openwaifud.models.DaemonState`）
 渲染成自然语言注入 prompt，让涂鸦能回答"你在忙什么""编码任务跑多久了"
-这类问题。
+这类问题。若同时提供会话详情（:class:`~openwaifud.models.SessionDetail`），
+还会把每个会话的元数据（工作目录等）与最近的对话摘要全量注入，使涂鸦能回答
+"在哪个项目干活""刚才聊了什么"这类细节问题。
 """
 
 from __future__ import annotations
 
-from openwaifud.models import AgentStatus, DaemonState, SessionInfo
+from openwaifud.models import AgentStatus, DaemonState, SessionDetail, SessionInfo
 
 # 状态枚举 -> 口语化中文描述
 _STATUS_LABELS: dict[AgentStatus, str] = {
@@ -31,8 +33,9 @@ _PERSONA = """\
 对话规则：
 1. 用户通过语音与你交谈，你的回复会被语音合成朗读。回复必须是口语化的简体中文短句，\
 通常不超过两三句话，禁止使用 Markdown、列表符号、表情符号或代码块。
-2. 用户询问工作状态（比如"现在在忙什么""任务跑完了吗"）时，依据下方的实时状态\
-概览如实回答；概览里没有的信息不要编造。
+2. 用户询问工作状态或细节（比如"现在在忙什么""任务跑完了吗""在哪个项目里干活"\
+"刚才 Agent 聊了什么"）时，依据下方的实时状态概览如实回答，包括会话的工作目录、\
+元数据和最近对话摘要；概览里没有的信息不要编造。
 3. 会话出错时先安抚再简述错误；一切空闲时可以轻松地陪主人闲聊。
 4. 保持亲切、活泼、简洁，像一只懂技术的小桌宠。"""
 
@@ -47,6 +50,22 @@ def _format_elapsed(seconds: float) -> str:
         return f"{minutes}分钟"
     hours, minutes = divmod(minutes, 60)
     return f"{hours}小时{minutes}分"
+
+
+# 常见元数据键 -> 口语化中文标签（其余键原样展示）
+_METADATA_LABELS: dict[str, str] = {
+    "directory": "工作目录",
+    "source": "来源",
+    "agent": "Agent",
+}
+
+# 消息角色 -> 口语化中文标签
+_ROLE_LABELS: dict[str, str] = {
+    "user": "主人",
+    "assistant": "Agent",
+    "tool": "工具",
+    "system": "系统",
+}
 
 
 def _format_session(index: int, session: SessionInfo) -> str:
@@ -64,29 +83,55 @@ def _format_session(index: int, session: SessionInfo) -> str:
     return "，".join(parts)
 
 
-def _render_state(state: DaemonState) -> str:
-    """把 DaemonState 渲染成注入 prompt 的自然语言状态概览。"""
+def _format_detail_lines(detail: SessionDetail) -> list[str]:
+    """把会话详情（元数据 + 聊天上下文）渲染成缩进的补充行。"""
+    lines: list[str] = []
+    for key, value in detail.metadata.items():
+        label = _METADATA_LABELS.get(key, key)
+        lines.append(f"   {label}：{value}")
+    if detail.chat_context:
+        lines.append("   该会话最近的对话摘要（时间从早到晚）：")
+        for msg in detail.chat_context:
+            role = _ROLE_LABELS.get(msg.role, msg.role)
+            lines.append(f"   [{role}] {msg.content}")
+    return lines
+
+
+def _render_state(state: DaemonState, details: list[SessionDetail] | None = None) -> str:
+    """把 DaemonState（及可选的会话详情）渲染成注入 prompt 的状态概览。"""
     overall = _STATUS_LABELS.get(state.agent_status, state.agent_status.value)
     lines = [
         f"总体状态：{overall}",
         f"与开发板的蓝牙连接：{'已连接' if state.ble_connected else '未连接'}",
         f"守护进程已运行：{_format_elapsed(state.uptime_seconds)}",
     ]
+    detail_map = {d.session_id: d for d in (details or [])}
     if state.sessions:
         lines.append(f"活跃会话（共 {len(state.sessions)} 个）：")
-        lines.extend(_format_session(i, s) for i, s in enumerate(state.sessions, start=1))
+        for i, s in enumerate(state.sessions, start=1):
+            lines.append(_format_session(i, s))
+            detail = detail_map.get(s.session_id)
+            if detail is not None:
+                lines.extend(_format_detail_lines(detail))
     else:
         lines.append("活跃会话：暂无，所有编程 Agent 都在休息。")
     return "\n".join(lines)
 
 
-def build_system_prompt(state: DaemonState | None = None) -> str:
+def build_system_prompt(
+    state: DaemonState | None = None,
+    details: list[SessionDetail] | None = None,
+) -> str:
     """构建注入实时状态的 system prompt。
 
     :param state: daemon 当前状态快照；为 None 时（如状态源不可用）
         仅返回人设部分，并提示涂鸦状态暂不可知。
+    :param details: 各会话的完整详情（元数据、聊天上下文），按 session_id
+        与 ``state.sessions`` 匹配后注入；缺失的会话仅展示概览行。
     """
     overview = (
-        "暂时读取不到工作状态，被问到时请如实说明。" if state is None else _render_state(state)
+        "暂时读取不到工作状态，被问到时请如实说明。"
+        if state is None
+        else _render_state(state, details)
     )
     return _PERSONA + "\n\n【实时状态概览】\n" + overview

@@ -24,9 +24,11 @@ class OpenWaifuDaemon:
             sweep_interval=config.session_sweep_interval,
         )
         self._ble_client = BLEClient(config)
-        # 对话服务接入状态快照，使「涂鸦」能在语音对话中播报 Agent 工作状态
+        # 对话服务接入状态快照与会话详情，使「涂鸦」能在语音对话中播报
+        # Agent 工作状态及工作目录、对话上下文等细节
         self._chat_service = ChatService(
             state_provider=self._state_manager.get_current_state,
+            details_provider=self._state_manager.list_session_details,
         )
         self._http_server = HTTPServer(
             state_manager=self._state_manager,

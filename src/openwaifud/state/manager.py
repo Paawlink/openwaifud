@@ -278,6 +278,11 @@ class StateManager:
             updated_at=rt.wall_updated_at,
         )
 
+    def list_session_details(self) -> list[SessionDetail]:
+        """返回所有会话的完整详情快照（供 chat prompt 注入等只读场景）。"""
+        details = (self.get_session_detail(sid) for sid in list(self._sessions))
+        return [d for d in details if d is not None]
+
     # ------------------------------------------------------------------
     # BLE 回调 / 生命周期
     # ------------------------------------------------------------------

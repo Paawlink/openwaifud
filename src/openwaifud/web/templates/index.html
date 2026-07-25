@@ -3,86 +3,192 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>OpenWaifuD 设备管理</title>
+<title>OpenWaifuD 控制台</title>
 <style>
   :root {
-    --bg: #0f1117;
-    --card: #1a1d27;
-    --border: #2a2e3d;
-    --text: #e6e8ef;
-    --muted: #8b90a1;
-    --accent: #7c9cff;
+    --bg: #0b0d14;
+    --bg-soft: #10131d;
+    --card: #161a26;
+    --card-hover: #1a1f2e;
+    --border: #262b3d;
+    --text: #e8eaf2;
+    --muted: #8b90a4;
+    --accent: #8b9dff;
+    --accent-2: #c084fc;
+    --accent-grad: linear-gradient(135deg, #7c9cff 0%, #c084fc 100%);
     --ok: #4ade80;
     --warn: #facc15;
     --err: #f87171;
+    --radius: 14px;
   }
   * { box-sizing: border-box; margin: 0; padding: 0; }
   body {
     background: var(--bg);
+    background-image:
+      radial-gradient(600px 300px at 15% -5%, rgba(124, 156, 255, 0.08), transparent),
+      radial-gradient(500px 300px at 90% 0%, rgba(192, 132, 252, 0.06), transparent);
     color: var(--text);
     font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif;
     min-height: 100vh;
-    padding: 32px 16px;
   }
-  .container { max-width: 720px; margin: 0 auto; }
-  h1 { font-size: 22px; margin-bottom: 4px; }
-  .subtitle { color: var(--muted); font-size: 13px; margin-bottom: 24px; }
+
+  /* ---------- 布局：侧边导航 + 内容区 ---------- */
+  .app {
+    display: flex;
+    max-width: 1080px;
+    margin: 0 auto;
+    min-height: 100vh;
+  }
+  .sidebar {
+    width: 220px;
+    flex-shrink: 0;
+    padding: 28px 16px;
+    display: flex;
+    flex-direction: column;
+    gap: 24px;
+    border-right: 1px solid var(--border);
+  }
+  .brand { display: flex; align-items: center; gap: 10px; padding: 0 10px; }
+  .brand-logo {
+    width: 34px; height: 34px;
+    border-radius: 10px;
+    background: var(--accent-grad);
+    display: flex; align-items: center; justify-content: center;
+    font-size: 18px;
+    box-shadow: 0 4px 14px rgba(124, 156, 255, 0.35);
+  }
+  .brand-name { font-size: 16px; font-weight: 700; letter-spacing: 0.3px; }
+  .brand-sub { font-size: 11px; color: var(--muted); }
+
+  nav { display: flex; flex-direction: column; gap: 4px; }
+  .nav-item {
+    display: flex; align-items: center; gap: 10px;
+    width: 100%;
+    padding: 11px 12px;
+    border: none;
+    border-radius: 10px;
+    background: transparent;
+    color: var(--muted);
+    font-size: 14px;
+    font-weight: 500;
+    cursor: pointer;
+    text-align: left;
+    transition: background 0.15s, color 0.15s;
+  }
+  .nav-item:hover { background: var(--bg-soft); color: var(--text); }
+  .nav-item.active {
+    background: rgba(124, 156, 255, 0.12);
+    color: var(--accent);
+    font-weight: 600;
+  }
+  .nav-item .icon { width: 18px; height: 18px; flex-shrink: 0; }
+  .nav-badge {
+    margin-left: auto;
+    font-size: 11px;
+    padding: 1px 8px;
+    border-radius: 999px;
+    background: var(--bg-soft);
+    color: var(--muted);
+  }
+  .nav-badge.on { background: rgba(74, 222, 128, 0.15); color: var(--ok); }
+
+  .sidebar-footer { margin-top: auto; padding: 0 10px; font-size: 11px; color: var(--muted); }
+
+  main { flex: 1; padding: 32px 28px 48px; min-width: 0; }
+  .page-head { margin-bottom: 22px; }
+  .page-head h1 { font-size: 20px; margin-bottom: 4px; }
+  .page-head p { color: var(--muted); font-size: 13px; }
+
+  .tab { display: none; animation: fadein 0.2s ease; }
+  .tab.active { display: block; }
+  @keyframes fadein { from { opacity: 0; transform: translateY(4px); } to { opacity: 1; transform: none; } }
+
+  /* ---------- 卡片 ---------- */
   .card {
     background: var(--card);
     border: 1px solid var(--border);
-    border-radius: 12px;
-    padding: 20px;
+    border-radius: var(--radius);
+    padding: 22px;
     margin-bottom: 16px;
   }
-  .card h2 { font-size: 15px; margin-bottom: 12px; color: var(--accent); }
+  .card h2 { font-size: 14px; margin-bottom: 14px; color: var(--text); font-weight: 600; }
+  .card .hint { font-size: 12px; color: var(--muted); margin-top: -8px; margin-bottom: 14px; }
+
+  /* ---------- 设备列表 ---------- */
   .device {
     display: flex;
     align-items: center;
     justify-content: space-between;
     gap: 12px;
-    padding: 12px 0;
+    padding: 14px;
+    border-radius: 10px;
     flex-wrap: wrap;
+    transition: background 0.15s;
   }
-  .device + .device { border-top: 1px solid var(--border); }
-  .device-info { flex: 1; min-width: 200px; }
+  .device:hover { background: var(--card-hover); }
+  .device + .device { margin-top: 6px; }
+  .device-info { display: flex; align-items: center; gap: 12px; flex: 1; min-width: 200px; }
+  .device-dot {
+    width: 10px; height: 10px;
+    border-radius: 50%;
+    background: var(--muted);
+    flex-shrink: 0;
+  }
+  .device-dot.on {
+    background: var(--ok);
+    box-shadow: 0 0 0 0 rgba(74, 222, 128, 0.5);
+    animation: pulse 2s infinite;
+  }
+  @keyframes pulse {
+    0% { box-shadow: 0 0 0 0 rgba(74, 222, 128, 0.45); }
+    70% { box-shadow: 0 0 0 8px rgba(74, 222, 128, 0); }
+    100% { box-shadow: 0 0 0 0 rgba(74, 222, 128, 0); }
+  }
   .device-name { font-size: 15px; font-weight: 600; }
   .device-addr { font-size: 12px; color: var(--muted); font-family: ui-monospace, monospace; margin-top: 2px; }
   .badges { display: flex; gap: 8px; flex-wrap: wrap; }
   .badge {
     font-size: 12px;
-    padding: 3px 10px;
+    padding: 4px 11px;
     border-radius: 999px;
     border: 1px solid var(--border);
+    background: var(--bg-soft);
     color: var(--muted);
   }
-  .badge.ok { color: var(--ok); border-color: var(--ok); }
-  .badge.warn { color: var(--warn); border-color: var(--warn); }
-  .badge.err { color: var(--err); border-color: var(--err); }
-  .empty { color: var(--muted); font-size: 14px; padding: 12px 0; }
-  form { display: flex; flex-direction: column; gap: 12px; }
+  .badge.ok { color: var(--ok); border-color: rgba(74, 222, 128, 0.4); background: rgba(74, 222, 128, 0.08); }
+  .badge.warn { color: var(--warn); border-color: rgba(250, 204, 21, 0.4); background: rgba(250, 204, 21, 0.08); }
+  .badge.err { color: var(--err); border-color: rgba(248, 113, 113, 0.4); background: rgba(248, 113, 113, 0.08); }
+  .empty { color: var(--muted); font-size: 14px; padding: 20px 0; text-align: center; }
+
+  /* ---------- 表单 ---------- */
+  form { display: flex; flex-direction: column; gap: 14px; }
   label { font-size: 13px; color: var(--muted); }
   input {
     width: 100%;
-    margin-top: 4px;
-    padding: 10px 12px;
-    border-radius: 8px;
+    margin-top: 6px;
+    padding: 11px 13px;
+    border-radius: 10px;
     border: 1px solid var(--border);
-    background: var(--bg);
+    background: var(--bg-soft);
     color: var(--text);
     font-size: 14px;
     outline: none;
+    transition: border-color 0.15s, box-shadow 0.15s;
   }
-  input:focus { border-color: var(--accent); }
+  input:focus { border-color: var(--accent); box-shadow: 0 0 0 3px rgba(124, 156, 255, 0.15); }
   button {
-    padding: 10px 16px;
-    border-radius: 8px;
+    padding: 11px 18px;
+    border-radius: 10px;
     border: none;
-    background: var(--accent);
-    color: #0f1117;
+    background: var(--accent-grad);
+    color: #0b0d14;
     font-size: 14px;
     font-weight: 600;
     cursor: pointer;
+    transition: opacity 0.15s, transform 0.1s;
   }
+  button:hover:not(:disabled) { opacity: 0.9; }
+  button:active:not(:disabled) { transform: scale(0.98); }
   button:disabled { opacity: 0.5; cursor: not-allowed; }
   .btn-row { display: flex; gap: 12px; }
   .btn-row button { flex: 1; }
@@ -91,75 +197,233 @@
     border: 1px solid var(--err);
     color: var(--err);
   }
-  #msg { font-size: 13px; min-height: 18px; }
-  #msg.ok { color: var(--ok); }
-  #msg.err { color: var(--err); }
+  .form-msg { font-size: 13px; min-height: 18px; color: var(--muted); }
+  .form-msg.ok { color: var(--ok); }
+  .form-msg.err { color: var(--err); }
+
+  /* ---------- 即时对话 ---------- */
+  .chat-box {
+    display: flex;
+    flex-direction: column;
+    height: 480px;
+    background: var(--card);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    overflow: hidden;
+  }
+  .chat-log {
+    flex: 1;
+    overflow-y: auto;
+    padding: 20px;
+    display: flex;
+    flex-direction: column;
+    gap: 12px;
+  }
+  .chat-empty {
+    margin: auto;
+    text-align: center;
+    color: var(--muted);
+    font-size: 13px;
+    line-height: 1.8;
+  }
+  .chat-empty .icon-lg { font-size: 32px; display: block; margin-bottom: 6px; }
+  .bubble {
+    max-width: 78%;
+    padding: 10px 14px;
+    border-radius: 14px;
+    font-size: 14px;
+    line-height: 1.6;
+    white-space: pre-wrap;
+    word-break: break-word;
+    animation: fadein 0.2s ease;
+  }
+  .bubble.user {
+    align-self: flex-end;
+    background: var(--accent-grad);
+    color: #0b0d14;
+    border-bottom-right-radius: 4px;
+  }
+  .bubble.bot {
+    align-self: flex-start;
+    background: var(--bg-soft);
+    border: 1px solid var(--border);
+    border-bottom-left-radius: 4px;
+  }
+  .bubble.pending { color: var(--muted); font-style: italic; }
+  .bubble.error { border-color: rgba(248, 113, 113, 0.4); color: var(--err); }
+  .chat-input-row {
+    display: flex;
+    flex-direction: row;
+    align-items: center;
+    gap: 10px;
+    padding: 14px;
+    border-top: 1px solid var(--border);
+    background: var(--bg-soft);
+  }
+  .chat-input-row input { flex: 1; margin-top: 0; }
+  .chat-input-row button { flex-shrink: 0; width: 88px; }
+
+  /* ---------- 移动端：侧边栏折叠为顶部标签 ---------- */
+  @media (max-width: 720px) {
+    .app { flex-direction: column; }
+    .sidebar {
+      width: 100%;
+      flex-direction: column;
+      padding: 16px;
+      gap: 14px;
+      border-right: none;
+      border-bottom: 1px solid var(--border);
+    }
+    nav { flex-direction: row; overflow-x: auto; }
+    .nav-item { width: auto; white-space: nowrap; padding: 9px 14px; }
+    .nav-badge { display: none; }
+    .sidebar-footer { display: none; }
+    main { padding: 20px 16px 40px; }
+    .chat-box { height: 60vh; }
+  }
 </style>
 </head>
 <body>
-<div class="container">
-  <h1>OpenWaifuD 设备管理</h1>
-  <p class="subtitle">已蓝牙连接的硬件设备与 WiFi 配网</p>
+<div class="app">
+  <aside class="sidebar">
+    <div class="brand">
+      <div class="brand-logo">🐾</div>
+      <div>
+        <div class="brand-name">OpenWaifuD</div>
+        <div class="brand-sub">桌宠设备控制台</div>
+      </div>
+    </div>
+    <nav id="nav">
+      <button class="nav-item active" data-tab="devices">
+        <svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="4" y="4" width="16" height="16" rx="2"/><circle cx="12" cy="12" r="3"/></svg>
+        设备总览
+        <span id="nav-device-count" class="nav-badge">0</span>
+      </button>
+      <button class="nav-item" data-tab="wifi">
+        <svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M5 12.55a11 11 0 0 1 14.08 0"/><path d="M8.53 16.11a6 6 0 0 1 6.95 0"/><circle cx="12" cy="20" r="1"/></svg>
+        WiFi 配网
+      </button>
+      <button class="nav-item" data-tab="chat">
+        <svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/></svg>
+        即时对话
+      </button>
+      <button class="nav-item" data-tab="settings">
+        <svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 1 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 1 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 1 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 1 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg>
+        模型设置
+      </button>
+    </nav>
+    <div class="sidebar-footer">openwaifud daemon</div>
+  </aside>
 
-  <div class="card">
-    <h2>设备列表</h2>
-    <div id="devices"><p class="empty">加载中…</p></div>
-  </div>
+  <main>
+    <!-- ========== 设备总览 ========== -->
+    <section id="tab-devices" class="tab active">
+      <div class="page-head">
+        <h1>设备总览</h1>
+        <p>已通过蓝牙连接的硬件设备及其 WiFi 状态，每 2 秒自动刷新</p>
+      </div>
+      <div class="card">
+        <div id="devices"><p class="empty">加载中…</p></div>
+      </div>
+    </section>
 
-  <div class="card">
-    <h2>WiFi 配网</h2>
-    <form id="provision-form">
-      <div>
-        <label for="ssid">WiFi 名称（SSID）</label>
-        <input id="ssid" name="ssid" maxlength="32" required autocomplete="off" placeholder="例如 MyHomeWiFi">
+    <!-- ========== WiFi 配网 ========== -->
+    <section id="tab-wifi" class="tab">
+      <div class="page-head">
+        <h1>WiFi 配网</h1>
+        <p>通过蓝牙向设备下发 WiFi 凭据，或让设备忘记已保存的网络</p>
       </div>
-      <div>
-        <label for="password">WiFi 密码（开放网络可留空）</label>
-        <input id="password" name="password" type="password" maxlength="64" autocomplete="off" placeholder="密码">
+      <div class="card">
+        <form id="provision-form">
+          <div>
+            <label for="ssid">WiFi 名称（SSID）</label>
+            <input id="ssid" name="ssid" maxlength="32" required autocomplete="off" placeholder="例如 MyHomeWiFi">
+          </div>
+          <div>
+            <label for="password">WiFi 密码（开放网络可留空）</label>
+            <input id="password" name="password" type="password" maxlength="64" autocomplete="off" placeholder="密码">
+          </div>
+          <div class="btn-row">
+            <button id="submit-btn" type="submit">下发配网</button>
+            <button id="forget-btn" type="button" class="danger">忘记网络</button>
+          </div>
+          <p id="msg" class="form-msg"></p>
+        </form>
       </div>
-      <div class="btn-row">
-        <button id="submit-btn" type="submit">下发配网</button>
-        <button id="forget-btn" type="button" class="danger">忘记网络</button>
-      </div>
-      <p id="msg"></p>
-    </form>
-  </div>
+    </section>
 
-  <div class="card">
-    <h2>对话模型</h2>
-    <form id="chat-config-form">
-      <div>
-        <label for="chat-base-url">API 地址（OpenAI 兼容，如 https://api.openai.com/v1）</label>
-        <input id="chat-base-url" maxlength="200" autocomplete="off" placeholder="https://api.openai.com/v1">
+    <!-- ========== 即时对话 ========== -->
+    <section id="tab-chat" class="tab">
+      <div class="page-head">
+        <h1>即时对话</h1>
+        <p>通过 POST /api/v1/chat 与已配置的模型进行同步对话</p>
       </div>
-      <div>
-        <label for="chat-api-key">API Key（留空表示保留已保存的 Key）</label>
-        <input id="chat-api-key" type="password" maxlength="200" autocomplete="off" placeholder="sk-...">
+      <div class="chat-box">
+        <div id="chat-log" class="chat-log">
+          <div id="chat-empty" class="chat-empty">
+            <span class="icon-lg">💬</span>
+            还没有消息，输入一句话试试吧<br>
+            （回复可能需要几十秒）
+          </div>
+        </div>
+        <form id="chat-form" class="chat-input-row">
+          <input id="chat-input" maxlength="4000" autocomplete="off" placeholder="你好呀">
+          <button id="chat-btn" type="submit">发送</button>
+        </form>
       </div>
-      <div>
-        <label for="chat-model">模型名</label>
-        <input id="chat-model" maxlength="100" autocomplete="off" placeholder="gpt-4o-mini">
-      </div>
-      <button id="chat-config-btn" type="submit">保存配置</button>
-      <p id="chat-config-msg"></p>
-    </form>
-  </div>
+    </section>
 
-  <div class="card">
-    <h2>对话测试</h2>
-    <form id="chat-form">
-      <div>
-        <label for="chat-input">消息（POST /api/v1/chat，同步返回回复）</label>
-        <input id="chat-input" maxlength="4000" autocomplete="off" placeholder="你好呀">
+    <!-- ========== 模型设置 ========== -->
+    <section id="tab-settings" class="tab">
+      <div class="page-head">
+        <h1>模型设置</h1>
+        <p>配置即时对话使用的 OpenAI 兼容模型，保存后立即生效</p>
       </div>
-      <button id="chat-btn" type="submit">发送</button>
-      <p id="chat-msg"></p>
-      <pre id="chat-reply" style="white-space: pre-wrap; font-size: 13px; color: var(--text); display: none; border-top: 1px solid var(--border); padding-top: 12px;"></pre>
-    </form>
-  </div>
+      <div class="card">
+        <form id="chat-config-form">
+          <div>
+            <label for="chat-base-url">API 地址（OpenAI 兼容，如 https://api.openai.com/v1）</label>
+            <input id="chat-base-url" maxlength="200" autocomplete="off" placeholder="https://api.openai.com/v1">
+          </div>
+          <div>
+            <label for="chat-api-key">API Key（留空表示保留已保存的 Key）</label>
+            <input id="chat-api-key" type="password" maxlength="200" autocomplete="off" placeholder="sk-...">
+          </div>
+          <div>
+            <label for="chat-model">模型名</label>
+            <input id="chat-model" maxlength="100" autocomplete="off" placeholder="gpt-4o-mini">
+          </div>
+          <button id="chat-config-btn" type="submit">保存配置</button>
+          <p id="chat-config-msg" class="form-msg"></p>
+        </form>
+      </div>
+    </section>
+  </main>
 </div>
 
 <script>
+/* ---------- 分区导航（支持 #hash 直达） ---------- */
+
+function switchTab(name) {
+  const item = document.querySelector('.nav-item[data-tab="' + name + '"]');
+  if (!item) return;
+  document.querySelectorAll(".nav-item").forEach(el => el.classList.remove("active"));
+  document.querySelectorAll(".tab").forEach(el => el.classList.remove("active"));
+  item.classList.add("active");
+  document.getElementById("tab-" + name).classList.add("active");
+}
+
+document.getElementById("nav").addEventListener("click", (ev) => {
+  const item = ev.target.closest(".nav-item");
+  if (!item) return;
+  switchTab(item.dataset.tab);
+  history.replaceState(null, "", "#" + item.dataset.tab);
+});
+
+if (location.hash) switchTab(location.hash.slice(1));
+
+/* ---------- 设备列表 ---------- */
+
 const WIFI_LABELS = {
   unknown: ["未知", ""],
   idle: ["WiFi 未配置", ""],
@@ -180,11 +444,16 @@ async function refreshDevices() {
     const resp = await fetch("/api/v1/devices");
     const data = await resp.json();
     const box = document.getElementById("devices");
-    if (!data.devices || data.devices.length === 0) {
+    const devices = data.devices || [];
+    const countBadge = document.getElementById("nav-device-count");
+    const onlineCount = devices.filter(d => d.ble_connected).length;
+    countBadge.textContent = onlineCount + "/" + devices.length;
+    countBadge.className = "nav-badge" + (onlineCount > 0 ? " on" : "");
+    if (devices.length === 0) {
       box.innerHTML = '<p class="empty">暂无设备。请确认硬件已开机且守护进程已连接蓝牙。</p>';
       return;
     }
-    box.innerHTML = data.devices.map(d => {
+    box.innerHTML = devices.map(d => {
       const ble = d.ble_connected
         ? '<span class="badge ok">蓝牙已连接</span>'
         : '<span class="badge err">蓝牙未连接</span>';
@@ -193,8 +462,11 @@ async function refreshDevices() {
         ? " (" + esc(d.wifi_detail) + ")" : "";
       return '<div class="device">' +
         '<div class="device-info">' +
-          '<div class="device-name">' + esc(d.name || "未知设备") + '</div>' +
-          '<div class="device-addr">' + esc(d.address || "-") + '</div>' +
+          '<span class="device-dot' + (d.ble_connected ? " on" : "") + '"></span>' +
+          '<div>' +
+            '<div class="device-name">' + esc(d.name || "未知设备") + '</div>' +
+            '<div class="device-addr">' + esc(d.address || "-") + '</div>' +
+          '</div>' +
         '</div>' +
         '<div class="badges">' + ble +
           '<span class="badge ' + cls + '">' + label + detail + '</span>' +
@@ -206,12 +478,14 @@ async function refreshDevices() {
   }
 }
 
+/* ---------- WiFi 配网 ---------- */
+
 document.getElementById("provision-form").addEventListener("submit", async (ev) => {
   ev.preventDefault();
   const btn = document.getElementById("submit-btn");
   const msg = document.getElementById("msg");
   btn.disabled = true;
-  msg.className = "";
+  msg.className = "form-msg";
   msg.textContent = "下发中…";
   try {
     const resp = await fetch("/api/v1/wifi/provision", {
@@ -224,14 +498,14 @@ document.getElementById("provision-form").addEventListener("submit", async (ev) 
     });
     const data = await resp.json();
     if (resp.ok) {
-      msg.className = "ok";
+      msg.className = "form-msg ok";
       msg.textContent = "已下发配网指令，设备正在连接 WiFi…";
     } else {
-      msg.className = "err";
+      msg.className = "form-msg err";
       msg.textContent = data.error || ("下发失败（HTTP " + resp.status + "）");
     }
   } catch (e) {
-    msg.className = "err";
+    msg.className = "form-msg err";
     msg.textContent = "请求失败，请检查守护进程是否运行";
   } finally {
     btn.disabled = false;
@@ -246,20 +520,20 @@ document.getElementById("forget-btn").addEventListener("click", async () => {
   const btn = document.getElementById("forget-btn");
   const msg = document.getElementById("msg");
   btn.disabled = true;
-  msg.className = "";
+  msg.className = "form-msg";
   msg.textContent = "下发中…";
   try {
     const resp = await fetch("/api/v1/wifi/forget", { method: "POST" });
     const data = await resp.json();
     if (resp.ok) {
-      msg.className = "ok";
+      msg.className = "form-msg ok";
       msg.textContent = "已下发忘记网络指令，设备将断开 WiFi 并清除凭据";
     } else {
-      msg.className = "err";
+      msg.className = "form-msg err";
       msg.textContent = data.error || ("下发失败（HTTP " + resp.status + "）");
     }
   } catch (e) {
-    msg.className = "err";
+    msg.className = "form-msg err";
     msg.textContent = "请求失败，请检查守护进程是否运行";
   } finally {
     btn.disabled = false;
@@ -270,7 +544,7 @@ document.getElementById("forget-btn").addEventListener("click", async () => {
 refreshDevices();
 setInterval(refreshDevices, 2000);
 
-/* ---------- 对话模型配置与即时对话测试 ---------- */
+/* ---------- 模型设置 ---------- */
 
 async function loadChatConfig() {
   try {
@@ -291,7 +565,7 @@ document.getElementById("chat-config-form").addEventListener("submit", async (ev
   const btn = document.getElementById("chat-config-btn");
   const msg = document.getElementById("chat-config-msg");
   btn.disabled = true;
-  msg.className = "";
+  msg.className = "form-msg";
   msg.textContent = "保存中…";
   try {
     const resp = await fetch("/api/v1/chat/config", {
@@ -305,33 +579,46 @@ document.getElementById("chat-config-form").addEventListener("submit", async (ev
     });
     const data = await resp.json();
     if (resp.ok) {
-      msg.className = "ok";
+      msg.className = "form-msg ok";
       msg.textContent = "配置已保存";
       document.getElementById("chat-api-key").value = "";
       loadChatConfig();
     } else {
-      msg.className = "err";
+      msg.className = "form-msg err";
       msg.textContent = data.error || ("保存失败（HTTP " + resp.status + "）");
     }
   } catch (e) {
-    msg.className = "err";
+    msg.className = "form-msg err";
     msg.textContent = "请求失败，请检查守护进程是否运行";
   } finally {
     btn.disabled = false;
   }
 });
 
+/* ---------- 即时对话（气泡样式） ---------- */
+
+function appendBubble(cls, text) {
+  const empty = document.getElementById("chat-empty");
+  if (empty) empty.remove();
+  const log = document.getElementById("chat-log");
+  const el = document.createElement("div");
+  el.className = "bubble " + cls;
+  el.textContent = text;
+  log.appendChild(el);
+  log.scrollTop = log.scrollHeight;
+  return el;
+}
+
 document.getElementById("chat-form").addEventListener("submit", async (ev) => {
   ev.preventDefault();
   const btn = document.getElementById("chat-btn");
-  const msg = document.getElementById("chat-msg");
-  const replyBox = document.getElementById("chat-reply");
-  const message = document.getElementById("chat-input").value.trim();
+  const input = document.getElementById("chat-input");
+  const message = input.value.trim();
   if (!message) return;
   btn.disabled = true;
-  msg.className = "";
-  msg.textContent = "等待回复中（可能需要几十秒）…";
-  replyBox.style.display = "none";
+  input.value = "";
+  appendBubble("user", message);
+  const pending = appendBubble("bot pending", "思考中…");
   try {
     const resp = await fetch("/api/v1/chat", {
       method: "POST",
@@ -340,18 +627,19 @@ document.getElementById("chat-form").addEventListener("submit", async (ev) => {
     });
     const data = await resp.json();
     if (resp.ok) {
-      msg.textContent = "";
-      replyBox.textContent = data.reply || "";
-      replyBox.style.display = "block";
+      pending.className = "bubble bot";
+      pending.textContent = data.reply || "";
     } else {
-      msg.className = "err";
-      msg.textContent = data.error || ("请求失败（HTTP " + resp.status + "）");
+      pending.className = "bubble bot error";
+      pending.textContent = data.error || ("请求失败（HTTP " + resp.status + "）");
     }
   } catch (e) {
-    msg.className = "err";
-    msg.textContent = "请求失败，请检查守护进程是否运行";
+    pending.className = "bubble bot error";
+    pending.textContent = "请求失败，请检查守护进程是否运行";
   } finally {
     btn.disabled = false;
+    document.getElementById("chat-log").scrollTop = document.getElementById("chat-log").scrollHeight;
+    input.focus();
   }
 });
 

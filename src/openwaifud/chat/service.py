@@ -4,7 +4,8 @@ daemon 直接调用网页端配置的 OpenAI 兼容接口（base_url + api_key +
 单次提问、阻塞等待并返回回复文本，适合桌宠侧的即时语音对话场景。
 
 每次请求会为内置语音助手「涂鸦」构建 system prompt，注入 daemon 的
-实时状态快照（见 :mod:`openwaifud.chat.prompt`）；服务内维护短期多轮
+实时状态快照与各会话的完整详情（工作目录等元数据、聊天上下文，见
+:mod:`openwaifud.chat.prompt`）；服务内维护短期多轮
 对话历史，使涂鸦能连贯地陪主人闲聊并播报 Agent 工作状态。
 
 配置持久化到本地 JSON 文件（默认 ``~/.config/openwaifud/chat.json``，
@@ -23,7 +24,7 @@ import aiohttp
 from loguru import logger
 
 from openwaifud.chat.prompt import build_system_prompt
-from openwaifud.models import ChatConfig, DaemonState
+from openwaifud.models import ChatConfig, DaemonState, SessionDetail
 
 # 上游推理可能较慢，给足总超时
 _REQUEST_TIMEOUT_SECONDS = 120.0
@@ -53,15 +54,20 @@ class ChatService:
         self,
         config_path: Path | None = None,
         state_provider: Callable[[], DaemonState] | None = None,
+        details_provider: Callable[[], list[SessionDetail]] | None = None,
     ) -> None:
         """
         :param state_provider: 返回 daemon 当前状态快照的回调（通常是
             ``StateManager.get_current_state``），用于向 system prompt 注入
             实时状态；不提供时 prompt 仅含人设。
+        :param details_provider: 返回各会话完整详情的回调（通常是
+            ``StateManager.list_session_details``），用于向 system prompt 注入
+            工作目录等元数据与聊天上下文；不提供时仅注入会话概览。
         """
         self._config_path = config_path or _default_config_path()
         self._config = self._load()
         self._state_provider = state_provider
+        self._details_provider = details_provider
         # 短期多轮对话历史（仅保留 user/assistant 文本回合）
         self._history: list[dict[str, Any]] = []
 
@@ -170,11 +176,17 @@ class ChatService:
         return assistant
 
     def _build_system_prompt(self) -> str:
-        """构建「涂鸦」的 system prompt，尽力注入实时状态。"""
+        """构建「涂鸦」的 system prompt，尽力注入实时状态与会话详情。"""
         state: DaemonState | None = None
         if self._state_provider is not None:
             try:
                 state = self._state_provider()
             except Exception as e:
                 logger.warning(f"State snapshot unavailable for chat prompt: {e}")
-        return build_system_prompt(state)
+        details: list[SessionDetail] | None = None
+        if state is not None and self._details_provider is not None:
+            try:
+                details = self._details_provider()
+            except Exception as e:
+                logger.warning(f"Session details unavailable for chat prompt: {e}")
+        return build_system_prompt(state, details)

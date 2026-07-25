@@ -8,7 +8,9 @@ from openwaifud.chat import ChatService, build_system_prompt
 from openwaifud.models import (
     AgentStatus,
     ChatConfig,
+    ChatMessage,
     DaemonState,
+    SessionDetail,
     SessionInfo,
 )
 
@@ -220,6 +222,41 @@ class TestSystemPrompt:
         assert "当前任务：重构登录模块" in prompt
         assert "错误信息：编译失败" in prompt
 
+    def test_details_render_metadata_and_chat_context(self):
+        """传入会话详情时，工作目录、元数据与对话摘要全量注入 prompt。"""
+        state = DaemonState(
+            agent_status=AgentStatus.CODING,
+            sessions=[
+                SessionInfo(session_id="s1", plugin_type="opencode", status=AgentStatus.CODING),
+            ],
+        )
+        details = [
+            SessionDetail(
+                session_id="s1",
+                plugin_type="opencode",
+                metadata={"directory": "/home/me/proj", "agent": "build"},
+                chat_context=[
+                    ChatMessage(role="user", content="帮我修登录 bug"),
+                    ChatMessage(role="assistant", content="好的，正在排查 auth 模块"),
+                ],
+            ),
+        ]
+        prompt = build_system_prompt(state, details)
+        assert "工作目录：/home/me/proj" in prompt
+        assert "Agent：build" in prompt
+        assert "该会话最近的对话摘要" in prompt
+        assert "[主人] 帮我修登录 bug" in prompt
+        assert "[Agent] 好的，正在排查 auth 模块" in prompt
+
+    def test_details_missing_session_only_renders_overview(self):
+        """详情中缺失的会话仅展示概览行，不报错。"""
+        state = DaemonState(
+            sessions=[SessionInfo(session_id="s1", plugin_type="codex")],
+        )
+        prompt = build_system_prompt(state, [])
+        assert "来自 codex 的会话" in prompt
+        assert "该会话最近的对话摘要" not in prompt
+
     async def test_chat_injects_state_from_provider(self, tmp_path, aiohttp_server):
         """接入 state_provider 后，上游收到的 system prompt 包含实时状态。"""
         captured: dict = {}
@@ -245,6 +282,72 @@ class TestSystemPrompt:
         assert await service.chat("在忙什么？") == "ok"
         system_content = captured["body"]["messages"][0]["content"]
         assert "总体状态：运行测试中" in system_content
+        assert "跑单测" in system_content
+
+    async def test_chat_injects_details_from_provider(self, tmp_path, aiohttp_server):
+        """接入 details_provider 后，上游收到的 system prompt 包含工作目录与对话上下文。"""
+        captured: dict = {}
+
+        async def completions(request: web.Request) -> web.Response:
+            captured["body"] = await request.json()
+            return web.json_response({"choices": [{"message": {"content": "ok"}}]})
+
+        upstream = web.Application()
+        upstream.router.add_post("/v1/chat/completions", completions)
+        server = await aiohttp_server(upstream)
+
+        state = DaemonState(
+            agent_status=AgentStatus.CODING,
+            sessions=[SessionInfo(session_id="s1", status=AgentStatus.CODING)],
+        )
+        details = [
+            SessionDetail(
+                session_id="s1",
+                metadata={"directory": "/tmp/demo"},
+                chat_context=[ChatMessage(role="user", content="重构登录模块")],
+            ),
+        ]
+        service = ChatService(
+            config_path=tmp_path / "chat.json",
+            state_provider=lambda: state,
+            details_provider=lambda: details,
+        )
+        service.save_config(
+            ChatConfig(base_url=f"http://{server.host}:{server.port}/v1", api_key="", model="m")
+        )
+        assert await service.chat("在哪个项目干活？") == "ok"
+        system_content = captured["body"]["messages"][0]["content"]
+        assert "工作目录：/tmp/demo" in system_content
+        assert "[主人] 重构登录模块" in system_content
+
+    async def test_details_provider_failure_keeps_overview(self, tmp_path, aiohttp_server):
+        """details_provider 抛异常时降级为仅注入概览，对话不受影响。"""
+        captured: dict = {}
+
+        async def completions(request: web.Request) -> web.Response:
+            captured["body"] = await request.json()
+            return web.json_response({"choices": [{"message": {"content": "ok"}}]})
+
+        upstream = web.Application()
+        upstream.router.add_post("/v1/chat/completions", completions)
+        server = await aiohttp_server(upstream)
+
+        def broken_details() -> list[SessionDetail]:
+            raise RuntimeError("boom")
+
+        state = DaemonState(
+            sessions=[SessionInfo(session_id="s1", current_task="跑单测")],
+        )
+        service = ChatService(
+            config_path=tmp_path / "chat.json",
+            state_provider=lambda: state,
+            details_provider=broken_details,
+        )
+        service.save_config(
+            ChatConfig(base_url=f"http://{server.host}:{server.port}/v1", api_key="", model="m")
+        )
+        assert await service.chat("hi") == "ok"
+        system_content = captured["body"]["messages"][0]["content"]
         assert "跑单测" in system_content
 
     async def test_provider_failure_falls_back(self, tmp_path, aiohttp_server):
