@@ -34,6 +34,7 @@ from openwaifud.models import (
     DetailUpdate,
     GlobalEventKind,
     PendingSessionCreate,
+    PluginInstanceInfo,
     SessionDetail,
     SessionInfo,
     StatusUpdate,
@@ -104,7 +105,7 @@ class StateManager:
         # 存活的 OpenCode 插件实例注册表（instance_id -> 运行时信息），
         # 由插件轮询“创建会话”待领取端点时顺带心跳维护。
         self._plugin_instances: dict[str, _PluginInstance] = {}
-        # 待 IDE 插件领取的“创建会话”指令（BLE 按键 / HTTP 调试端点产生）
+        # 待 IDE 插件领取的“创建会话”指令（由「涂鸦」对话技能产生）
         self._pending_session_creates: list[PendingSessionCreate] = []
 
     @property
@@ -235,12 +236,12 @@ class StateManager:
         logger.debug(f"Global event emitted: {event}")
 
     # ------------------------------------------------------------------
-    # 创建会话（BLE 侧 -> 最新存活的 OpenCode 实例）
+    # 创建会话（「涂鸦」对话技能 -> 用户确认的 OpenCode 实例）
     # ------------------------------------------------------------------
 
     # 未被领取的指令超过此时长后丢弃，避免插件离线多时后重新上线时补建陈旧会话
     _CREATE_TTL_SECONDS = 60.0
-    # 待领取队列上限（防止设备侧连续触发堆积）
+    # 待领取队列上限（防止连续触发堆积）
     _CREATE_QUEUE_MAX = 8
     # 插件轮询周期为 3 秒；超过此时长未轮询视为实例已退出
     _INSTANCE_TTL_SECONDS = 10.0
@@ -249,7 +250,7 @@ class StateManager:
         """登记/刷新一个 OpenCode 插件实例的心跳。
 
         插件每次轮询待领取端点时调用；首次出现时记录注册时间，
-        用于判定“最新的实例”（注册最晚者优先）。
+        用于实例列表的稳定排序。
         """
         now = time.monotonic()
         inst = self._plugin_instances.get(instance_id)
@@ -261,8 +262,8 @@ class StateManager:
         if directory:
             inst.directory = directory
 
-    def _latest_live_instance(self) -> _PluginInstance | None:
-        """返回最新注册的存活实例；无存活实例时返回 None（顺便清理过期项）。"""
+    def _expire_plugin_instances(self) -> None:
+        """清理心跳超时的插件实例。"""
         now = time.monotonic()
         expired = [
             iid
@@ -272,20 +273,30 @@ class StateManager:
         for iid in expired:
             del self._plugin_instances[iid]
             logger.debug(f"Plugin instance expired: {iid}")
-        if not self._plugin_instances:
-            return None
-        return max(self._plugin_instances.values(), key=lambda inst: inst.first_seen)
 
-    def request_session_create(self, prompt: str = "") -> PendingSessionCreate | None:
-        """登记一条“创建会话”指令（来自 BLE 通知或 HTTP 调试端点）。
+    def list_live_instances(self) -> list[PluginInstanceInfo]:
+        """返回当前存活的 OpenCode 实例列表（按注册先后稳定排序）。
 
-        指令定向下发给当前最新注册的存活 OpenCode 实例，目录解析为该
-        实例自己上报的工作区（未上报时回退用户主目录）。没有存活实例
-        时拒绝执行并返回 None，由调用方向发起侧反馈。
+        供「涂鸦」的 system prompt 注入，让用户在对话中确认目标实例。
         """
-        target = self._latest_live_instance()
+        self._expire_plugin_instances()
+        ordered = sorted(self._plugin_instances.values(), key=lambda inst: inst.first_seen)
+        return [
+            PluginInstanceInfo(instance_id=inst.instance_id, directory=inst.directory)
+            for inst in ordered
+        ]
+
+    def request_session_create(self, instance_id: str, prompt: str = "") -> PendingSessionCreate | None:
+        """登记一条定向指定实例的“创建会话”指令。
+
+        由「涂鸦」对话技能在用户确认目标实例后调用；目录解析为该
+        实例自己上报的工作区（未上报时回退用户主目录）。目标实例
+        不存在或已离线时拒绝执行并返回 None，由调用方向用户反馈。
+        """
+        self._expire_plugin_instances()
+        target = self._plugin_instances.get(instance_id)
         if target is None:
-            logger.warning("Session create refused: no live OpenCode instance")
+            logger.warning(f"Session create refused: instance not live ({instance_id})")
             return None
 
         request = PendingSessionCreate(

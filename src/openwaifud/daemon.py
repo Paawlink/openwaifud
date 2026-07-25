@@ -9,8 +9,8 @@ from loguru import logger
 from openwaifud.api.server import HTTPServer
 from openwaifud.ble.client import BLEClient
 from openwaifud.chat import ChatService
+from openwaifud.chat.skills import CreateOpenCodeSessionSkill
 from openwaifud.config import Config
-from openwaifud.models import GlobalEventKind
 from openwaifud.state.manager import StateManager
 
 
@@ -25,7 +25,13 @@ class OpenWaifuDaemon:
             sweep_interval=config.session_sweep_interval,
         )
         self._ble_client = BLEClient(config)
-        self._chat_service = ChatService()
+        # 对话服务接入状态快照与实例列表，并挂载“创建 OpenCode 会话”技能，
+        # 使「涂鸦」能在语音对话中播报 Agent 状态，并在用户确认实例后新建会话
+        self._chat_service = ChatService(
+            state_provider=self._state_manager.get_current_state,
+            instances_provider=self._state_manager.list_live_instances,
+            skills=[CreateOpenCodeSessionSkill(self._state_manager)],
+        )
         self._http_server = HTTPServer(
             state_manager=self._state_manager,
             host=config.http_host,
@@ -56,9 +62,6 @@ class OpenWaifuDaemon:
         self._state_manager.set_ble_callback(self._ble_client.handle_message)
         # BLE（重）连接后由状态管理器重新同步会话看板
         self._ble_client.set_on_connected(self._state_manager.resync_ble)
-        # 设备侧“新建会话”请求 -> 定向登记给最新存活的 OpenCode 实例；
-        # 没有存活实例时拒绝执行，并用全局 error 事件向设备反馈。
-        self._ble_client.set_on_session_create(self._on_device_session_create)
 
         # Start state consumer (background queue processing)
         await self._state_manager.start_consumer()
@@ -73,18 +76,6 @@ class OpenWaifuDaemon:
         await self._http_server.start()
 
         logger.info(f"OpenWaifuD running - HTTP: http://{self._config.http_host}:{self._config.http_port}")
-
-    def _on_device_session_create(self, prompt: str) -> None:
-        """BLE 侧“新建会话”通知处理：无存活 OpenCode 实例时拒绝并反馈。"""
-        pending = self._state_manager.request_session_create(prompt)
-        if pending is None:
-            # bleak 通知回调运行在事件循环内，可直接调度异步反馈
-            try:
-                asyncio.get_running_loop().create_task(
-                    self._state_manager.emit_global_event(GlobalEventKind.ERROR, "无OpenCode实例")
-                )
-            except RuntimeError:
-                logger.warning("No running loop to report refused session create")
 
     async def _stop(self) -> None:
         """Stop all components gracefully."""

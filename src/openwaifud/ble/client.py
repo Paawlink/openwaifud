@@ -10,8 +10,7 @@
 - 固定间隔自动重连（默认每 5 秒一次，不使用退避策略）；
 - 使用 asyncio.Lock 串行化写入；
 - 订阅固件 Notify 特征（:data:`~openwaifud.ble.protocol.NOTIFY_CHAR_UUID`），
-  接收设备回传的 WiFi 状态并缓存，供网页端配网界面查询；同时接收设备侧
-  发起的“新建会话”请求（``N|<prompt>``）并转交回调；
+  接收设备回传的 WiFi 状态并缓存，供网页端配网界面查询；
 - 优雅降级：写入失败仅记录日志，不向上抛出异常。
 """
 
@@ -58,8 +57,6 @@ class BLEClient:
         self._should_run: bool = False
         # BLE（重）连接成功后触发的回调（通常为 StateManager.resync_ble）
         self._on_connected: Callable[[], Coroutine[Any, Any, None]] | None = None
-        # 设备侧发起“新建会话”请求时的回调（通常为 StateManager.request_session_create）
-        self._on_session_create: Callable[[str], Any] | None = None
         # 已连接设备信息（供网页端设备列表展示）
         self._device_name: str = ""
         self._device_address: str = ""
@@ -131,10 +128,6 @@ class BLEClient:
     def set_on_connected(self, callback: Callable[[], Coroutine[Any, Any, None]]) -> None:
         """注册连接成功回调，用于在（重）连后重新同步会话看板。"""
         self._on_connected = callback
-
-    def set_on_session_create(self, callback: Callable[[str], Any]) -> None:
-        """注册“新建会话”回调（同步函数，入参为设备侧附带的 prompt 文本）。"""
-        self._on_session_create = callback
 
     async def start(self) -> None:
         """启动 BLE 客户端并尝试首次连接。"""
@@ -349,13 +342,6 @@ class BLEClient:
             self._wifi_status = note["status"]
             self._wifi_detail = note["detail"]
             logger.info(f"Device WiFi status: {note['status']} {note['detail']}".rstrip())
-        elif note["type"] == "session_create":
-            logger.info(f"Device requested new session: prompt=\"{note['prompt']}\"")
-            if self._on_session_create is not None:
-                try:
-                    self._on_session_create(note["prompt"])
-                except Exception as e:
-                    logger.error(f"session_create callback error: {e}")
 
     # ------------------------------------------------------------------
     # 写入

@@ -17,7 +17,6 @@ from openwaifud.models import (
     ConversationContext,
     DetailUpdate,
     GlobalEvent,
-    SessionCreateRequest,
     StatusUpdate,
     WifiProvisionRequest,
 )
@@ -46,7 +45,6 @@ def setup_routes(
     app.router.add_post("/api/v1/event", handlers.handle_event)
     app.router.add_post("/api/v1/session/detail", handlers.handle_detail_post)
     app.router.add_get("/api/v1/session/{session_id}/detail", handlers.handle_detail_get)
-    app.router.add_post("/api/v1/session/create", handlers.handle_session_create)
     app.router.add_get("/api/v1/session/create/pending", handlers.handle_session_create_pending)
     app.router.add_get("/api/v1/chat/config", handlers.handle_chat_config_get)
     app.router.add_put("/api/v1/chat/config", handlers.handle_chat_config_put)
@@ -262,51 +260,13 @@ class APIHandlers:
             )
         return web.json_response(detail.model_dump(mode="json"))
 
-    async def handle_session_create(self, request: web.Request) -> web.Response:
-        """POST /api/v1/session/create - 登记一条“创建会话”指令（调试端点）。
-
-        与 BLE 侧 ``N|<prompt>`` 通知等效，便于无硬件时联调整条链路。
-        请求体可为空（默认无 prompt）。没有存活的 OpenCode 实例时
-        拒绝执行并返回 409。
-        """
-        raw = await request.text()
-        if raw.strip():
-            try:
-                data = await request.json()
-            except Exception:
-                return web.json_response(
-                    {"error": "Invalid JSON body"},
-                    status=400,
-                )
-        else:
-            data = {}
-
-        try:
-            req = SessionCreateRequest(**data)
-        except ValidationError as e:
-            return web.json_response(
-                {"error": "Validation failed", "details": e.errors()},
-                status=422,
-            )
-
-        pending = self._state_manager.request_session_create(req.prompt)
-        if pending is None:
-            return web.json_response(
-                {"error": "没有正在运行的 OpenCode 实例，已拒绝创建会话"},
-                status=409,
-            )
-        logger.info(f"Session create queued via HTTP: {pending.request_id}")
-        return web.json_response(
-            {"success": True, "request": pending.model_dump(mode="json")},
-            status=200,
-        )
-
     async def handle_session_create_pending(self, request: web.Request) -> web.Response:
         """GET /api/v1/session/create/pending - 领取定向给本实例的“创建会话”指令。
 
-        查询参数 ``instance_id``（必需）与 ``directory``（可选）兼作插件
-        实例心跳，用于维护存活实例注册表。消费式读取（每条指令只
-        返回一次），领取后由插件在 OpenCode 中实际创建并切到前台。
+        指令由「涂鸦」对话技能在用户确认目标实例后登记。查询参数
+        ``instance_id``（必需）与 ``directory``（可选）兼作插件实例心跳，
+        用于维护存活实例注册表。消费式读取（每条指令只返回一次），
+        领取后由插件在 OpenCode 中实际创建并切到前台。
         """
         instance_id = request.query.get("instance_id", "").strip()
         if not instance_id:

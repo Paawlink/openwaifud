@@ -260,24 +260,8 @@ class TestParseDeviceNotification:
         assert parse_device_notification(b"W|G|\xff\xfe") is None
 
 
-class TestParseSessionCreateNotification:
-    """N 通知（设备侧新建会话）解析测试。"""
-
-    def test_with_prompt(self):
-        result = parse_device_notification("N|帮我修 bug".encode())
-        assert result == {"type": "session_create", "prompt": "帮我修 bug"}
-
-    def test_without_prompt(self):
-        assert parse_device_notification(b"N") == {"type": "session_create", "prompt": ""}
-
-    def test_empty_prompt_field(self):
-        assert parse_device_notification(b"N|") == {"type": "session_create", "prompt": ""}
-
-    def test_prompt_may_contain_separator(self):
-        # 首个 | 之后的内容整体作为 prompt，不再拆分
-        result = parse_device_notification(b"N|a|b")
-        assert result is not None
-        assert result["prompt"] == "a|b"
+class TestParseNotificationEdgeCases:
+    """通知解析的边界情况。"""
 
     def test_empty_payload_returns_none(self):
         assert parse_device_notification(b"") is None

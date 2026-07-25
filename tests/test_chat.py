@@ -1,11 +1,19 @@
-"""Tests for openwaifud.chat（即时对话服务与 HTTP 端点）。"""
+"""Tests for openwaifud.chat（即时对话服务、system prompt 与 HTTP 端点）。"""
 
 import pytest
 from aiohttp import web
 
 from openwaifud.api.handlers import setup_routes
-from openwaifud.chat import ChatService
-from openwaifud.models import ChatConfig
+from openwaifud.chat import ChatService, build_system_prompt
+from openwaifud.chat.service import ChatUpstreamError
+from openwaifud.chat.skills import CreateOpenCodeSessionSkill
+from openwaifud.models import (
+    AgentStatus,
+    ChatConfig,
+    DaemonState,
+    PluginInstanceInfo,
+    SessionInfo,
+)
 
 
 @pytest.fixture
@@ -132,7 +140,7 @@ class TestChatEndpoint:
         assert resp.status == 422
 
     async def test_chat_returns_upstream_reply(self, client, chat_service, fake_upstream):
-        """配置好上游后，同步返回模型回复，并带上 Bearer 认证。"""
+        """配置好上游后，同步返回模型回复，并带上 Bearer 认证与 system prompt。"""
         server, captured = await fake_upstream()
         chat_service.save_config(
             ChatConfig(
@@ -148,7 +156,11 @@ class TestChatEndpoint:
         assert data["reply"] == "喵～你好！"
         assert captured["auth"] == "Bearer sk-test"
         assert captured["body"]["model"] == "gpt-x"
-        assert captured["body"]["messages"] == [{"role": "user", "content": "你好呀"}]
+        messages = captured["body"]["messages"]
+        assert len(messages) == 2
+        assert messages[0]["role"] == "system"
+        assert "涂鸦" in messages[0]["content"]
+        assert messages[1] == {"role": "user", "content": "你好呀"}
 
     async def test_upstream_error_returns_502(self, client, chat_service, aiohttp_server):
         """上游返回非 200 时映射为 502。"""
@@ -166,6 +178,292 @@ class TestChatEndpoint:
         cli = await client
         resp = await cli.post("/api/v1/chat", json={"message": "hi"})
         assert resp.status == 502
+
+
+class TestSystemPrompt:
+    """「涂鸦」的 system prompt 构建与状态注入。"""
+
+    def test_without_state_contains_persona_and_fallback(self):
+        prompt = build_system_prompt(None)
+        assert "涂鸦" in prompt
+        assert "暂时读取不到工作状态" in prompt
+        assert "当前没有存活的 OpenCode 实例" in prompt
+
+    def test_instances_rendered_with_project_names(self):
+        instances = [
+            PluginInstanceInfo(instance_id="inst-a", directory="/tmp/proj-a"),
+            PluginInstanceInfo(instance_id="inst-b", directory=""),
+        ]
+        prompt = build_system_prompt(None, instances)
+        assert "共 2 个" in prompt
+        assert "项目「proj-a」" in prompt
+        assert "instance_id：inst-a" in prompt
+        assert "未知项目" in prompt
+        assert "instance_id：inst-b" in prompt
+
+    def test_idle_state_renders_overview(self):
+        state = DaemonState(ble_connected=True, uptime_seconds=90.0)
+        prompt = build_system_prompt(state)
+        assert "总体状态：空闲" in prompt
+        assert "已连接" in prompt
+        assert "1分钟" in prompt
+        assert "暂无" in prompt
+
+    def test_sessions_rendered_with_task_and_error(self):
+        state = DaemonState(
+            agent_status=AgentStatus.CODING,
+            sessions=[
+                SessionInfo(
+                    session_id="s1",
+                    plugin_type="opencode",
+                    status=AgentStatus.CODING,
+                    current_task="重构登录模块",
+                    elapsed_seconds=125.0,
+                ),
+                SessionInfo(
+                    session_id="s2",
+                    plugin_type="claudecode",
+                    status=AgentStatus.ERROR,
+                    error_message="编译失败",
+                    elapsed_seconds=30.0,
+                ),
+            ],
+        )
+        prompt = build_system_prompt(state)
+        assert "总体状态：编写代码中" in prompt
+        assert "共 2 个" in prompt
+        assert "来自 opencode 的会话" in prompt
+        assert "当前任务：重构登录模块" in prompt
+        assert "错误信息：编译失败" in prompt
+
+    async def test_chat_injects_state_from_provider(self, tmp_path, aiohttp_server):
+        """接入 state_provider 后，上游收到的 system prompt 包含实时状态。"""
+        captured: dict = {}
+
+        async def completions(request: web.Request) -> web.Response:
+            captured["body"] = await request.json()
+            return web.json_response({"choices": [{"message": {"content": "ok"}}]})
+
+        upstream = web.Application()
+        upstream.router.add_post("/v1/chat/completions", completions)
+        server = await aiohttp_server(upstream)
+
+        state = DaemonState(
+            agent_status=AgentStatus.TESTING,
+            sessions=[
+                SessionInfo(session_id="s1", status=AgentStatus.TESTING, current_task="跑单测")
+            ],
+        )
+        service = ChatService(config_path=tmp_path / "chat.json", state_provider=lambda: state)
+        service.save_config(
+            ChatConfig(base_url=f"http://{server.host}:{server.port}/v1", api_key="", model="m")
+        )
+        assert await service.chat("在忙什么？") == "ok"
+        system_content = captured["body"]["messages"][0]["content"]
+        assert "总体状态：运行测试中" in system_content
+        assert "跑单测" in system_content
+
+    async def test_provider_failure_falls_back(self, tmp_path, aiohttp_server):
+        """state_provider 抛异常时降级为纯人设 prompt，对话不受影响。"""
+        captured: dict = {}
+
+        async def completions(request: web.Request) -> web.Response:
+            captured["body"] = await request.json()
+            return web.json_response({"choices": [{"message": {"content": "ok"}}]})
+
+        upstream = web.Application()
+        upstream.router.add_post("/v1/chat/completions", completions)
+        server = await aiohttp_server(upstream)
+
+        def broken_provider() -> DaemonState:
+            raise RuntimeError("boom")
+
+        service = ChatService(config_path=tmp_path / "chat.json", state_provider=broken_provider)
+        service.save_config(
+            ChatConfig(base_url=f"http://{server.host}:{server.port}/v1", api_key="", model="m")
+        )
+        assert await service.chat("hi") == "ok"
+        system_content = captured["body"]["messages"][0]["content"]
+        assert "涂鸦" in system_content
+        assert "暂时读取不到工作状态" in system_content
+
+
+class TestCreateOpenCodeSessionSkill:
+    """创建 OpenCode 会话技能的直接执行路径。"""
+
+    def test_spec_declares_required_instance_id(self, state_manager):
+        spec = CreateOpenCodeSessionSkill(state_manager).spec()
+        assert spec["type"] == "function"
+        assert spec["function"]["name"] == "create_opencode_session"
+        assert spec["function"]["parameters"]["required"] == ["instance_id"]
+
+    def test_missing_instance_id_returns_error_text(self, state_manager):
+        skill = CreateOpenCodeSessionSkill(state_manager)
+        assert "缺少 instance_id" in skill.execute({})
+
+    def test_offline_instance_returns_error_text(self, state_manager):
+        skill = CreateOpenCodeSessionSkill(state_manager)
+        result = skill.execute({"instance_id": "ghost"})
+        assert "不存在或已离线" in result
+
+    def test_success_queues_targeted_request(self, state_manager):
+        state_manager.touch_plugin_instance("inst-1", "/tmp/proj")
+        skill = CreateOpenCodeSessionSkill(state_manager)
+        result = skill.execute({"instance_id": "inst-1", "prompt": "修 bug"})
+        assert "/tmp/proj" in result
+        # 指令可被目标实例领取，且为消费式
+        claimed = state_manager.claim_pending_session_creates("inst-1")
+        assert len(claimed) == 1
+        assert claimed[0].prompt == "修 bug"
+        assert state_manager.claim_pending_session_creates("inst-1") == []
+
+
+class TestToolCallFlow:
+    """模型发起 tool call → 执行技能 → 回传结果 → 最终文本回复。"""
+
+    async def test_tool_call_creates_session_and_replies(
+        self, tmp_path, aiohttp_server, state_manager
+    ):
+        requests_seen: list[dict] = []
+
+        async def completions(request: web.Request) -> web.Response:
+            body = await request.json()
+            requests_seen.append(body)
+            if len(requests_seen) == 1:
+                # 首轮：模型决定调用创建会话技能
+                return web.json_response(
+                    {
+                        "choices": [
+                            {
+                                "message": {
+                                    "role": "assistant",
+                                    "content": None,
+                                    "tool_calls": [
+                                        {
+                                            "id": "call-1",
+                                            "type": "function",
+                                            "function": {
+                                                "name": "create_opencode_session",
+                                                "arguments": '{"instance_id": "inst-1", "prompt": "修 bug"}',
+                                            },
+                                        }
+                                    ],
+                                }
+                            }
+                        ]
+                    }
+                )
+            # 次轮：模型拿到技能结果后给出最终回复
+            return web.json_response(
+                {"choices": [{"message": {"role": "assistant", "content": "已经建好啦！"}}]}
+            )
+
+        upstream = web.Application()
+        upstream.router.add_post("/v1/chat/completions", completions)
+        server = await aiohttp_server(upstream)
+
+        state_manager.touch_plugin_instance("inst-1", "/tmp/proj")
+        service = ChatService(
+            config_path=tmp_path / "chat.json",
+            instances_provider=state_manager.list_live_instances,
+            skills=[CreateOpenCodeSessionSkill(state_manager)],
+        )
+        service.save_config(
+            ChatConfig(base_url=f"http://{server.host}:{server.port}/v1", api_key="", model="m")
+        )
+
+        assert await service.chat("在第一个项目新建会话，修 bug") == "已经建好啦！"
+        assert len(requests_seen) == 2
+
+        # 首轮请求携带 tools 声明，system prompt 含实例列表
+        first = requests_seen[0]
+        assert first["tools"][0]["function"]["name"] == "create_opencode_session"
+        assert "instance_id：inst-1" in first["messages"][0]["content"]
+
+        # 次轮请求包含 assistant 的 tool_calls 与 tool 结果消息
+        second_messages = requests_seen[1]["messages"]
+        assert second_messages[-2]["tool_calls"][0]["id"] == "call-1"
+        assert second_messages[-1]["role"] == "tool"
+        assert second_messages[-1]["tool_call_id"] == "call-1"
+        assert "/tmp/proj" in second_messages[-1]["content"]
+
+        # 指令已登记，可被目标实例领取
+        claimed = state_manager.claim_pending_session_creates("inst-1")
+        assert len(claimed) == 1
+        assert claimed[0].prompt == "修 bug"
+
+    async def test_endless_tool_calls_raise_upstream_error(
+        self, tmp_path, aiohttp_server, state_manager
+    ):
+        """模型持续发起 tool call 时，超过轮数上限报 502 类错误。"""
+
+        async def completions(request: web.Request) -> web.Response:
+            return web.json_response(
+                {
+                    "choices": [
+                        {
+                            "message": {
+                                "role": "assistant",
+                                "content": None,
+                                "tool_calls": [
+                                    {
+                                        "id": "call-x",
+                                        "type": "function",
+                                        "function": {"name": "nope", "arguments": "{}"},
+                                    }
+                                ],
+                            }
+                        }
+                    ]
+                }
+            )
+
+        upstream = web.Application()
+        upstream.router.add_post("/v1/chat/completions", completions)
+        server = await aiohttp_server(upstream)
+
+        service = ChatService(
+            config_path=tmp_path / "chat.json",
+            skills=[CreateOpenCodeSessionSkill(state_manager)],
+        )
+        service.save_config(
+            ChatConfig(base_url=f"http://{server.host}:{server.port}/v1", api_key="", model="m")
+        )
+
+        with pytest.raises(ChatUpstreamError):
+            await service.chat("hi")
+
+
+class TestChatHistory:
+    """短期多轮历史：支撑“确认哪个实例”类多轮交互。"""
+
+    async def test_history_carried_to_next_turn(self, tmp_path, aiohttp_server):
+        requests_seen: list[dict] = []
+
+        async def completions(request: web.Request) -> web.Response:
+            requests_seen.append(await request.json())
+            return web.json_response(
+                {"choices": [{"message": {"content": f"回复{len(requests_seen)}"}}]}
+            )
+
+        upstream = web.Application()
+        upstream.router.add_post("/v1/chat/completions", completions)
+        server = await aiohttp_server(upstream)
+
+        service = ChatService(config_path=tmp_path / "chat.json")
+        service.save_config(
+            ChatConfig(base_url=f"http://{server.host}:{server.port}/v1", api_key="", model="m")
+        )
+
+        assert await service.chat("第一句") == "回复1"
+        assert await service.chat("第二句") == "回复2"
+
+        # 第二次请求带上了第一轮的 user/assistant 历史
+        second_messages = requests_seen[1]["messages"]
+        assert [m["role"] for m in second_messages] == ["system", "user", "assistant", "user"]
+        assert second_messages[1]["content"] == "第一句"
+        assert second_messages[2]["content"] == "回复1"
+        assert second_messages[3]["content"] == "第二句"
 
 
 class TestChatDisabled:

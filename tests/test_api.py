@@ -214,8 +214,8 @@ class TestDetailEndpoint:
         assert resp.status == 404
 
 
-class TestSessionCreateEndpoint:
-    """Tests for POST /api/v1/session/create 与 GET /api/v1/session/create/pending。"""
+class TestSessionCreatePending:
+    """Tests for GET /api/v1/session/create/pending（指令由对话技能登记）。"""
 
     @staticmethod
     async def _register_instance(cli, instance_id="inst-1", directory=""):
@@ -226,64 +226,56 @@ class TestSessionCreateEndpoint:
         resp = await cli.get("/api/v1/session/create/pending", params=params)
         assert resp.status == 200
 
-    async def test_create_without_live_instance_returns_409(self, client):
-        """没有存活的 OpenCode 实例时拒绝创建，返回 409。"""
-        cli = await client
-        resp = await cli.post("/api/v1/session/create")
-        assert resp.status == 409
-        data = await resp.json()
-        assert "error" in data
+    async def test_request_without_live_instance_returns_none(self, client, state_manager):
+        """目标实例不存在或已离线时，request_session_create 返回 None。"""
+        await client
+        assert state_manager.request_session_create("ghost", "hi") is None
 
-    async def test_create_targets_instance_directory(self, client):
-        """指令定向给存活实例，目录为该实例自己上报的工作区。"""
+    async def test_request_uses_instance_directory(self, client, state_manager):
+        """指令定向给指定实例，目录为该实例自己上报的工作区。"""
         cli = await client
         await self._register_instance(cli, "inst-1", "/tmp/workspace-a")
-        resp = await cli.post("/api/v1/session/create", json={"prompt": "帮我修 bug"})
-        assert resp.status == 200
-        data = await resp.json()
-        assert data["success"] is True
-        assert data["request"]["instance_id"] == "inst-1"
-        assert data["request"]["directory"] == "/tmp/workspace-a"
-        assert data["request"]["prompt"] == "帮我修 bug"
+        pending = state_manager.request_session_create("inst-1", "帮我修 bug")
+        assert pending is not None
+        assert pending.instance_id == "inst-1"
+        assert pending.directory == "/tmp/workspace-a"
+        assert pending.prompt == "帮我修 bug"
 
-    async def test_create_without_directory_falls_back_to_home(self, client):
+    async def test_request_without_directory_falls_back_to_home(self, client, state_manager):
         """实例未上报工作区时，目录回退到用户主目录。"""
         cli = await client
         await self._register_instance(cli, "inst-1")
-        resp = await cli.post("/api/v1/session/create")
-        assert resp.status == 200
-        data = await resp.json()
-        assert data["request"]["directory"] == str(Path.home())
+        pending = state_manager.request_session_create("inst-1")
+        assert pending is not None
+        assert pending.directory == str(Path.home())
 
-    async def test_create_targets_latest_instance(self, client):
-        """多实例时定向最新注册的那一个，且只有目标实例能领取。"""
+    async def test_only_target_instance_claims_request(self, client, state_manager):
+        """多实例时指令只定向给用户确认的那一个，其他实例领不到。"""
         cli = await client
-        await self._register_instance(cli, "inst-old", "/tmp/old")
-        await self._register_instance(cli, "inst-new", "/tmp/new")
-        resp = await cli.post("/api/v1/session/create", json={"prompt": "hi"})
-        assert resp.status == 200
-        data = await resp.json()
-        assert data["request"]["instance_id"] == "inst-new"
-        assert data["request"]["directory"] == "/tmp/new"
+        await self._register_instance(cli, "inst-a", "/tmp/a")
+        await self._register_instance(cli, "inst-b", "/tmp/b")
+        pending = state_manager.request_session_create("inst-a", "hi")
+        assert pending is not None
+        assert pending.instance_id == "inst-a"
 
-        # 旧实例领不到定向给新实例的指令
-        resp_old = await cli.get(
-            "/api/v1/session/create/pending", params={"instance_id": "inst-old"}
+        # 非目标实例领不到定向指令
+        resp_b = await cli.get(
+            "/api/v1/session/create/pending", params={"instance_id": "inst-b"}
         )
-        assert (await resp_old.json())["requests"] == []
-        # 新实例能领取
-        resp_new = await cli.get(
-            "/api/v1/session/create/pending", params={"instance_id": "inst-new"}
+        assert (await resp_b.json())["requests"] == []
+        # 目标实例能领取
+        resp_a = await cli.get(
+            "/api/v1/session/create/pending", params={"instance_id": "inst-a"}
         )
-        requests = (await resp_new.json())["requests"]
+        requests = (await resp_a.json())["requests"]
         assert len(requests) == 1
         assert requests[0]["prompt"] == "hi"
 
-    async def test_pending_is_consumed_once(self, client):
+    async def test_pending_is_consumed_once(self, client, state_manager):
         """pending 为消费式读取：每条指令只返回一次。"""
         cli = await client
         await self._register_instance(cli, "inst-1", "/tmp/ws")
-        await cli.post("/api/v1/session/create", json={"prompt": "hello"})
+        assert state_manager.request_session_create("inst-1", "hello") is not None
         resp = await cli.get(
             "/api/v1/session/create/pending", params={"instance_id": "inst-1"}
         )
@@ -304,21 +296,14 @@ class TestSessionCreateEndpoint:
         resp = await cli.get("/api/v1/session/create/pending")
         assert resp.status == 400
 
-    async def test_create_invalid_json_returns_400(self, client):
-        """非空但不合法的 JSON 请求体返回 400。"""
+    async def test_list_live_instances_reflects_heartbeats(self, client, state_manager):
+        """list_live_instances 按注册顺序返回存活实例（供 system prompt 注入）。"""
         cli = await client
-        resp = await cli.post(
-            "/api/v1/session/create",
-            data=b"not json",
-            headers={"Content-Type": "application/json"},
-        )
-        assert resp.status == 400
-
-    async def test_create_overlong_prompt_returns_422(self, client):
-        """prompt 超长时返回 422。"""
-        cli = await client
-        resp = await cli.post("/api/v1/session/create", json={"prompt": "x" * 501})
-        assert resp.status == 422
+        await self._register_instance(cli, "inst-a", "/tmp/a")
+        await self._register_instance(cli, "inst-b", "/tmp/b")
+        instances = state_manager.list_live_instances()
+        assert [i.instance_id for i in instances] == ["inst-a", "inst-b"]
+        assert instances[0].directory == "/tmp/a"
 
 
 class TestHealthEndpoint:

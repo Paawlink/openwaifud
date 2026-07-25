@@ -41,8 +41,6 @@ CR -> ``%0D``、LF -> ``%0A``，固件侧做对应的 ``%XX`` 解码。
 ======  ==============================================  ================================
 WiFi    ``W|<st>|<detail>``                             WiFi 状态（``st`` 见 :data:`WIFI_STATUS_CHARS`，
                                                         已连接时 ``detail`` 为 IP 地址）
-新建    ``N|<prompt>``                                  请求在 IDE 侧创建一个新会话
-                                                        （``prompt`` 可选，为首条消息文本）
 ======  ==============================================  ================================
 """
 
@@ -71,8 +69,6 @@ CMD_GLOBAL = "G"
 CMD_DETAIL = "D"
 CMD_WIFI = "W"
 CMD_WIFI_FORGET = "F"
-# 设备 -> 守护进程（Notify 方向）：请求在 IDE 侧新建一个会话
-CMD_SESSION_NEW = "N"
 
 # 详情数据类型码（D 命令的 <kind> 字段）
 DETAIL_ERROR = "0"  # 错误信息
@@ -201,12 +197,8 @@ def encode_wifi_forget() -> bytes:
 def parse_device_notification(payload: bytes) -> dict[str, str] | None:
     """解析固件经 Notify 特征回传的单行通知。
 
-    支持两类通知：
-
-    - WiFi 状态 ``W|<st>|<detail>``，返回形如
-      ``{"type": "wifi_status", "status": "connected", "detail": "192.168.1.5"}``；
-    - 新建会话 ``N|<prompt>``（``prompt`` 可缺省），返回形如
-      ``{"type": "session_create", "prompt": "帮我修 bug"}``。
+    目前仅支持 WiFi 状态 ``W|<st>|<detail>``，返回形如
+    ``{"type": "wifi_status", "status": "connected", "detail": "192.168.1.5"}``。
 
     无法识别的通知返回 None。
     """
@@ -217,10 +209,6 @@ def parse_device_notification(payload: bytes) -> dict[str, str] | None:
 
     if not line:
         return None
-
-    if line == CMD_SESSION_NEW or line.startswith(CMD_SESSION_NEW + FIELD_SEP):
-        _, _, prompt = line.partition(FIELD_SEP)
-        return {"type": "session_create", "prompt": prompt.strip()}
 
     parts = line.split(FIELD_SEP, 2)
     if len(parts) < 2 or parts[0] != CMD_WIFI:

@@ -125,22 +125,24 @@ class DetailUpdate(BaseModel):
     timestamp: datetime = Field(default_factory=lambda: datetime.now(UTC))
 
 
-class SessionCreateRequest(BaseModel):
-    """“创建会话”请求（来自 BLE 设备通知或 HTTP 调试端点）。
+class PluginInstanceInfo(BaseModel):
+    """一个存活的 OpenCode 插件实例的公开视图。
 
-    守护进程收到后生成一条 :class:`PendingSessionCreate` 指令，等待 IDE 插件
-    轮询领取并在 OpenCode 中实际创建会话。
+    由插件轮询心跳维护；注入「涂鸦」的 system prompt 供其在对话中
+    向用户列举并确认目标实例。
     """
 
-    prompt: str = Field(default="", max_length=500, description="可选的首条消息/标题文本")
+    instance_id: str
+    directory: str = ""
 
 
 class PendingSessionCreate(BaseModel):
     """待 IDE 插件领取的“创建会话”指令。
 
-    指令定向下发给登记时最新的存活 OpenCode 实例（``instance_id``），
-    ``directory`` 解析为该实例自己上报的工作区目录（未上报时回退到
-    用户主目录），使新会话出现在目标实例自己的项目里。
+    由「涂鸦」对话技能在用户确认目标实例后登记，定向下发给指定的
+    存活 OpenCode 实例（``instance_id``）；``directory`` 解析为该实例自己
+    上报的工作区目录（未上报时回退到用户主目录），使新会话出现在
+    目标实例自己的项目里。
     """
 
     request_id: str
