@@ -1,5 +1,7 @@
 """Tests for openwaifud.api (HTTP handlers)."""
 
+from pathlib import Path
+
 import pytest
 from aiohttp import web
 
@@ -212,6 +214,113 @@ class TestDetailEndpoint:
         assert resp.status == 404
 
 
+class TestSessionCreateEndpoint:
+    """Tests for POST /api/v1/session/create 与 GET /api/v1/session/create/pending。"""
+
+    @staticmethod
+    async def _register_instance(cli, instance_id="inst-1", directory=""):
+        """用一次轮询登记插件实例心跳（模拟存活的 OpenCode 实例）。"""
+        params = {"instance_id": instance_id}
+        if directory:
+            params["directory"] = directory
+        resp = await cli.get("/api/v1/session/create/pending", params=params)
+        assert resp.status == 200
+
+    async def test_create_without_live_instance_returns_409(self, client):
+        """没有存活的 OpenCode 实例时拒绝创建，返回 409。"""
+        cli = await client
+        resp = await cli.post("/api/v1/session/create")
+        assert resp.status == 409
+        data = await resp.json()
+        assert "error" in data
+
+    async def test_create_targets_instance_directory(self, client):
+        """指令定向给存活实例，目录为该实例自己上报的工作区。"""
+        cli = await client
+        await self._register_instance(cli, "inst-1", "/tmp/workspace-a")
+        resp = await cli.post("/api/v1/session/create", json={"prompt": "帮我修 bug"})
+        assert resp.status == 200
+        data = await resp.json()
+        assert data["success"] is True
+        assert data["request"]["instance_id"] == "inst-1"
+        assert data["request"]["directory"] == "/tmp/workspace-a"
+        assert data["request"]["prompt"] == "帮我修 bug"
+
+    async def test_create_without_directory_falls_back_to_home(self, client):
+        """实例未上报工作区时，目录回退到用户主目录。"""
+        cli = await client
+        await self._register_instance(cli, "inst-1")
+        resp = await cli.post("/api/v1/session/create")
+        assert resp.status == 200
+        data = await resp.json()
+        assert data["request"]["directory"] == str(Path.home())
+
+    async def test_create_targets_latest_instance(self, client):
+        """多实例时定向最新注册的那一个，且只有目标实例能领取。"""
+        cli = await client
+        await self._register_instance(cli, "inst-old", "/tmp/old")
+        await self._register_instance(cli, "inst-new", "/tmp/new")
+        resp = await cli.post("/api/v1/session/create", json={"prompt": "hi"})
+        assert resp.status == 200
+        data = await resp.json()
+        assert data["request"]["instance_id"] == "inst-new"
+        assert data["request"]["directory"] == "/tmp/new"
+
+        # 旧实例领不到定向给新实例的指令
+        resp_old = await cli.get(
+            "/api/v1/session/create/pending", params={"instance_id": "inst-old"}
+        )
+        assert (await resp_old.json())["requests"] == []
+        # 新实例能领取
+        resp_new = await cli.get(
+            "/api/v1/session/create/pending", params={"instance_id": "inst-new"}
+        )
+        requests = (await resp_new.json())["requests"]
+        assert len(requests) == 1
+        assert requests[0]["prompt"] == "hi"
+
+    async def test_pending_is_consumed_once(self, client):
+        """pending 为消费式读取：每条指令只返回一次。"""
+        cli = await client
+        await self._register_instance(cli, "inst-1", "/tmp/ws")
+        await cli.post("/api/v1/session/create", json={"prompt": "hello"})
+        resp = await cli.get(
+            "/api/v1/session/create/pending", params={"instance_id": "inst-1"}
+        )
+        assert resp.status == 200
+        data = await resp.json()
+        assert len(data["requests"]) == 1
+        assert data["requests"][0]["prompt"] == "hello"
+
+        resp2 = await cli.get(
+            "/api/v1/session/create/pending", params={"instance_id": "inst-1"}
+        )
+        data2 = await resp2.json()
+        assert data2["requests"] == []
+
+    async def test_pending_without_instance_id_returns_400(self, client):
+        """缺 instance_id 时返回 400（旧版插件不再兼容）。"""
+        cli = await client
+        resp = await cli.get("/api/v1/session/create/pending")
+        assert resp.status == 400
+
+    async def test_create_invalid_json_returns_400(self, client):
+        """非空但不合法的 JSON 请求体返回 400。"""
+        cli = await client
+        resp = await cli.post(
+            "/api/v1/session/create",
+            data=b"not json",
+            headers={"Content-Type": "application/json"},
+        )
+        assert resp.status == 400
+
+    async def test_create_overlong_prompt_returns_422(self, client):
+        """prompt 超长时返回 422。"""
+        cli = await client
+        resp = await cli.post("/api/v1/session/create", json={"prompt": "x" * 501})
+        assert resp.status == 422
+
+
 class TestHealthEndpoint:
     """Tests for GET /api/v1/health."""
 
@@ -224,3 +333,55 @@ class TestHealthEndpoint:
         assert data["status"] == "ok"
         assert "ble_connected" in data
         assert "uptime_seconds" in data
+
+
+class TestDevicesEndpoint:
+    """Tests for GET /api/v1/devices."""
+
+    async def test_no_ble_client_returns_empty_list(self, client):
+        """未提供 ble_client 时设备列表为空。"""
+        cli = await client
+        resp = await cli.get("/api/v1/devices")
+        assert resp.status == 200
+        data = await resp.json()
+        assert data["devices"] == []
+
+
+class TestWifiProvisionEndpoint:
+    """Tests for POST /api/v1/wifi/provision."""
+
+    async def test_invalid_json_returns_400(self, client):
+        cli = await client
+        resp = await cli.post(
+            "/api/v1/wifi/provision",
+            data=b"not json",
+            headers={"Content-Type": "application/json"},
+        )
+        assert resp.status == 400
+
+    async def test_empty_ssid_returns_422(self, client):
+        cli = await client
+        resp = await cli.post("/api/v1/wifi/provision", json={"ssid": "", "password": "x"})
+        assert resp.status == 422
+        data = await resp.json()
+        assert data["error"] == "Validation failed"
+
+    async def test_no_ble_client_returns_503(self, client):
+        """未提供 ble_client（或未连接）时返回 503。"""
+        cli = await client
+        resp = await cli.post("/api/v1/wifi/provision", json={"ssid": "MyWiFi", "password": "secret"})
+        assert resp.status == 503
+        data = await resp.json()
+        assert "error" in data
+
+
+class TestWifiForgetEndpoint:
+    """Tests for POST /api/v1/wifi/forget."""
+
+    async def test_no_ble_client_returns_503(self, client):
+        """未提供 ble_client（或未连接）时返回 503。"""
+        cli = await client
+        resp = await cli.post("/api/v1/wifi/forget")
+        assert resp.status == 503
+        data = await resp.json()
+        assert "error" in data

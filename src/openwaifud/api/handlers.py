@@ -2,31 +2,144 @@
 
 from __future__ import annotations
 
+from typing import TYPE_CHECKING
+
+import aiohttp_jinja2
 from aiohttp import web
 from loguru import logger
 from pydantic import ValidationError
 
-from openwaifud.models import ConversationContext, DetailUpdate, GlobalEvent, StatusUpdate
+from openwaifud.ble.protocol import BLEProtocolError
+from openwaifud.chat import ChatNotConfiguredError, ChatService, ChatUpstreamError
+from openwaifud.models import (
+    ChatConfig,
+    ChatRequest,
+    ConversationContext,
+    DetailUpdate,
+    GlobalEvent,
+    SessionCreateRequest,
+    StatusUpdate,
+    WifiProvisionRequest,
+)
 from openwaifud.state.manager import StateManager
 
+if TYPE_CHECKING:
+    from openwaifud.ble.client import BLEClient
 
-def setup_routes(app: web.Application, state_manager: StateManager) -> None:
-    """Register all API routes."""
-    handlers = APIHandlers(state_manager)
+
+def setup_routes(
+    app: web.Application,
+    state_manager: StateManager,
+    ble_client: BLEClient | None = None,
+    chat_service: ChatService | None = None,
+) -> None:
+    """Register all API routes.
+
+    :param ble_client: BLE 客户端（可选）。提供时启用设备列表与 WiFi 配网接口；
+        未提供时（如单元测试）相关接口返回 503。
+    :param chat_service: 即时对话服务（可选）。未提供时对话相关接口返回 503。
+    """
+    handlers = APIHandlers(state_manager, ble_client, chat_service)
+    app.router.add_get("/", handlers.handle_index)
     app.router.add_post("/api/v1/status", handlers.handle_status)
     app.router.add_post("/api/v1/context", handlers.handle_context)
     app.router.add_post("/api/v1/event", handlers.handle_event)
     app.router.add_post("/api/v1/session/detail", handlers.handle_detail_post)
     app.router.add_get("/api/v1/session/{session_id}/detail", handlers.handle_detail_get)
+    app.router.add_post("/api/v1/session/create", handlers.handle_session_create)
+    app.router.add_get("/api/v1/session/create/pending", handlers.handle_session_create_pending)
+    app.router.add_get("/api/v1/chat/config", handlers.handle_chat_config_get)
+    app.router.add_put("/api/v1/chat/config", handlers.handle_chat_config_put)
+    app.router.add_post("/api/v1/chat", handlers.handle_chat)
     app.router.add_get("/api/v1/state", handlers.handle_state)
     app.router.add_get("/api/v1/health", handlers.handle_health)
+    app.router.add_get("/api/v1/devices", handlers.handle_devices)
+    app.router.add_post("/api/v1/wifi/provision", handlers.handle_wifi_provision)
+    app.router.add_post("/api/v1/wifi/forget", handlers.handle_wifi_forget)
 
 
 class APIHandlers:
     """HTTP request handlers."""
 
-    def __init__(self, state_manager: StateManager) -> None:
+    def __init__(
+        self,
+        state_manager: StateManager,
+        ble_client: BLEClient | None = None,
+        chat_service: ChatService | None = None,
+    ) -> None:
         self._state_manager = state_manager
+        self._ble_client = ble_client
+        self._chat_service = chat_service
+
+    async def handle_index(self, request: web.Request) -> web.Response:
+        """GET / - 网页端设备管理页（蓝牙设备列表 + WiFi 配网）。"""
+        return aiohttp_jinja2.render_template("index.html", request, {})
+
+    async def handle_devices(self, request: web.Request) -> web.Response:
+        """GET /api/v1/devices - 已知硬件设备列表（含 BLE/WiFi 状态）。"""
+        devices = self._ble_client.get_devices() if self._ble_client is not None else []
+        return web.json_response({"devices": devices})
+
+    async def handle_wifi_provision(self, request: web.Request) -> web.Response:
+        """POST /api/v1/wifi/provision - 向已连接设备下发 WiFi 凭据。"""
+        try:
+            data = await request.json()
+        except Exception:
+            return web.json_response(
+                {"error": "Invalid JSON body"},
+                status=400,
+            )
+
+        try:
+            req = WifiProvisionRequest(**data)
+        except ValidationError as e:
+            return web.json_response(
+                {"error": "Validation failed", "details": e.errors()},
+                status=422,
+            )
+
+        if self._ble_client is None or not self._ble_client.connected:
+            return web.json_response(
+                {"error": "设备未连接，请先等待蓝牙连接成功"},
+                status=503,
+            )
+
+        try:
+            ok = await self._ble_client.send_wifi_provision(req.ssid, req.password)
+        except BLEProtocolError as e:
+            return web.json_response(
+                {"error": str(e)},
+                status=422,
+            )
+        if not ok:
+            return web.json_response(
+                {"error": "BLE 写入失败，请重试"},
+                status=502,
+            )
+
+        logger.info(f'WiFi provision accepted: ssid="{req.ssid}"')
+        return web.json_response(
+            {"success": True, "ssid": req.ssid},
+            status=200,
+        )
+
+    async def handle_wifi_forget(self, request: web.Request) -> web.Response:
+        """POST /api/v1/wifi/forget - 让设备断开 WiFi 并清除已保存的凭据。"""
+        if self._ble_client is None or not self._ble_client.connected:
+            return web.json_response(
+                {"error": "设备未连接，请先等待蓝牙连接成功"},
+                status=503,
+            )
+
+        ok = await self._ble_client.send_wifi_forget()
+        if not ok:
+            return web.json_response(
+                {"error": "BLE 写入失败，请重试"},
+                status=502,
+            )
+
+        logger.info("WiFi forget accepted")
+        return web.json_response({"success": True}, status=200)
 
     async def handle_status(self, request: web.Request) -> web.Response:
         """POST /api/v1/status - Receive agent status update."""
@@ -148,6 +261,128 @@ class APIHandlers:
                 status=404,
             )
         return web.json_response(detail.model_dump(mode="json"))
+
+    async def handle_session_create(self, request: web.Request) -> web.Response:
+        """POST /api/v1/session/create - 登记一条“创建会话”指令（调试端点）。
+
+        与 BLE 侧 ``N|<prompt>`` 通知等效，便于无硬件时联调整条链路。
+        请求体可为空（默认无 prompt）。没有存活的 OpenCode 实例时
+        拒绝执行并返回 409。
+        """
+        raw = await request.text()
+        if raw.strip():
+            try:
+                data = await request.json()
+            except Exception:
+                return web.json_response(
+                    {"error": "Invalid JSON body"},
+                    status=400,
+                )
+        else:
+            data = {}
+
+        try:
+            req = SessionCreateRequest(**data)
+        except ValidationError as e:
+            return web.json_response(
+                {"error": "Validation failed", "details": e.errors()},
+                status=422,
+            )
+
+        pending = self._state_manager.request_session_create(req.prompt)
+        if pending is None:
+            return web.json_response(
+                {"error": "没有正在运行的 OpenCode 实例，已拒绝创建会话"},
+                status=409,
+            )
+        logger.info(f"Session create queued via HTTP: {pending.request_id}")
+        return web.json_response(
+            {"success": True, "request": pending.model_dump(mode="json")},
+            status=200,
+        )
+
+    async def handle_session_create_pending(self, request: web.Request) -> web.Response:
+        """GET /api/v1/session/create/pending - 领取定向给本实例的“创建会话”指令。
+
+        查询参数 ``instance_id``（必需）与 ``directory``（可选）兼作插件
+        实例心跳，用于维护存活实例注册表。消费式读取（每条指令只
+        返回一次），领取后由插件在 OpenCode 中实际创建并切到前台。
+        """
+        instance_id = request.query.get("instance_id", "").strip()
+        if not instance_id:
+            return web.json_response(
+                {"error": "Missing instance_id", "requests": []},
+                status=400,
+            )
+        directory = request.query.get("directory", "").strip()
+        requests = self._state_manager.claim_pending_session_creates(instance_id, directory)
+        return web.json_response(
+            {"requests": [req.model_dump(mode="json") for req in requests]},
+        )
+
+    async def handle_chat_config_get(self, request: web.Request) -> web.Response:
+        """GET /api/v1/chat/config - 读取对话模型配置（api_key 不回显）。"""
+        if self._chat_service is None:
+            return web.json_response({"error": "对话服务未启用"}, status=503)
+        return web.json_response(self._chat_service.get_public_config())
+
+    async def handle_chat_config_put(self, request: web.Request) -> web.Response:
+        """PUT /api/v1/chat/config - 保存对话模型配置（网页端）。
+
+        空 api_key 表示保留已保存的 Key，便于只改 base_url / model。
+        """
+        if self._chat_service is None:
+            return web.json_response({"error": "对话服务未启用"}, status=503)
+        try:
+            data = await request.json()
+        except Exception:
+            return web.json_response(
+                {"error": "Invalid JSON body"},
+                status=400,
+            )
+
+        try:
+            cfg = ChatConfig(**data)
+        except ValidationError as e:
+            return web.json_response(
+                {"error": "Validation failed", "details": e.errors()},
+                status=422,
+            )
+
+        self._chat_service.save_config(cfg)
+        return web.json_response(
+            {"success": True, **self._chat_service.get_public_config()},
+        )
+
+    async def handle_chat(self, request: web.Request) -> web.Response:
+        """POST /api/v1/chat - 即时对话：单次提问，同步返回模型回复。"""
+        if self._chat_service is None:
+            return web.json_response({"error": "对话服务未启用"}, status=503)
+        try:
+            data = await request.json()
+        except Exception:
+            return web.json_response(
+                {"error": "Invalid JSON body"},
+                status=400,
+            )
+
+        try:
+            req = ChatRequest(**data)
+        except ValidationError as e:
+            return web.json_response(
+                {"error": "Validation failed", "details": e.errors()},
+                status=422,
+            )
+
+        try:
+            reply = await self._chat_service.chat(req.message)
+        except ChatNotConfiguredError as e:
+            return web.json_response({"error": str(e)}, status=503)
+        except ChatUpstreamError as e:
+            logger.warning(f"Chat upstream error: {e}")
+            return web.json_response({"error": str(e)}, status=502)
+
+        return web.json_response({"reply": reply})
 
     async def handle_state(self, request: web.Request) -> web.Response:
         """GET /api/v1/state - Get current daemon state."""

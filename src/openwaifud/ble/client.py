@@ -9,6 +9,9 @@
 - 支持按 MAC/UUID 地址直连，或未配置地址时按设备名扫描；
 - 固定间隔自动重连（默认每 5 秒一次，不使用退避策略）；
 - 使用 asyncio.Lock 串行化写入；
+- 订阅固件 Notify 特征（:data:`~openwaifud.ble.protocol.NOTIFY_CHAR_UUID`），
+  接收设备回传的 WiFi 状态并缓存，供网页端配网界面查询；同时接收设备侧
+  发起的“新建会话”请求（``N|<prompt>``）并转交回调；
 - 优雅降级：写入失败仅记录日志，不向上抛出异常。
 """
 
@@ -26,12 +29,16 @@ from bleak.exc import BleakError
 from loguru import logger
 
 from openwaifud.ble.protocol import (
+    NOTIFY_CHAR_UUID,
     WRITE_CHAR_UUID,
     encode_global_event,
     encode_session_detail,
     encode_session_upsert,
     encode_sync_begin,
     encode_sync_end,
+    encode_wifi_forget,
+    encode_wifi_provision,
+    parse_device_notification,
 )
 from openwaifud.config import Config
 from openwaifud.models import AgentStatus, GlobalEventKind
@@ -51,14 +58,83 @@ class BLEClient:
         self._should_run: bool = False
         # BLE（重）连接成功后触发的回调（通常为 StateManager.resync_ble）
         self._on_connected: Callable[[], Coroutine[Any, Any, None]] | None = None
+        # 设备侧发起“新建会话”请求时的回调（通常为 StateManager.request_session_create）
+        self._on_session_create: Callable[[str], Any] | None = None
+        # 已连接设备信息（供网页端设备列表展示）
+        self._device_name: str = ""
+        self._device_address: str = ""
+        # 固件经 Notify 特征回传的 WiFi 状态（unknown 表示尚未收到任何通知）
+        self._wifi_status: str = "unknown"
+        self._wifi_detail: str = ""
 
     @property
     def connected(self) -> bool:
         return self._connected and self._client is not None and self._client.is_connected
 
+    @property
+    def wifi_status(self) -> str:
+        """设备最近上报的 WiFi 状态（unknown/idle/connecting/connected/failed/disconnected）。"""
+        return self._wifi_status
+
+    def get_devices(self) -> list[dict[str, Any]]:
+        """返回当前已知硬件设备的快照列表（供网页端设备列表展示）。
+
+        守护进程当前只维护一条 BLE 连接，因此列表中最多一个条目；未连接时
+        仍返回配置的目标设备（标记为未连接），便于网页端展示重连进度。
+        """
+        name = self._device_name or self._config.ble_device_name or "OpenWaifu"
+        address = self._device_address or self._config.ble_address
+        return [
+            {
+                "name": name,
+                "address": address,
+                "ble_connected": self.connected,
+                "wifi_status": self._wifi_status if self.connected else "unknown",
+                "wifi_detail": self._wifi_detail if self.connected else "",
+            }
+        ]
+
+    async def send_wifi_provision(self, ssid: str, password: str) -> bool:
+        """向设备下发 WiFi 配网命令（W|ssid|password）。
+
+        :return: True 表示已成功写入 BLE；False 表示未连接或写入失败。
+        :raises BLEProtocolError: 凭据为空或编码后超长。
+        """
+        if not self.connected:
+            return False
+
+        payload = encode_wifi_provision(ssid, password)
+        ok = await self._write_payload(payload)
+        if ok:
+            # 乐观置为连接中，固件随后会经 Notify 回传真实状态
+            self._wifi_status = "connecting"
+            self._wifi_detail = ""
+            logger.info(f'WiFi provision sent: ssid="{ssid}"')
+        return ok
+
+    async def send_wifi_forget(self) -> bool:
+        """向设备下发“忘记网络”命令（F）：断开 WiFi 并清除已存凭据。
+
+        :return: True 表示已成功写入 BLE；False 表示未连接或写入失败。
+        """
+        if not self.connected:
+            return False
+
+        ok = await self._write_payload(encode_wifi_forget())
+        if ok:
+            # 乐观置为未配置，固件随后会经 Notify 回传真实状态
+            self._wifi_status = "idle"
+            self._wifi_detail = ""
+            logger.info("WiFi forget sent")
+        return ok
+
     def set_on_connected(self, callback: Callable[[], Coroutine[Any, Any, None]]) -> None:
         """注册连接成功回调，用于在（重）连后重新同步会话看板。"""
         self._on_connected = callback
+
+    def set_on_session_create(self, callback: Callable[[str], Any]) -> None:
+        """注册“新建会话”回调（同步函数，入参为设备侧附带的 prompt 文本）。"""
+        self._on_session_create = callback
 
     async def start(self) -> None:
         """启动 BLE 客户端并尝试首次连接。"""
@@ -172,6 +248,8 @@ class BLEClient:
         """设备意外断开时的回调。"""
         self._connected = False
         self._write_char = None
+        self._wifi_status = "unknown"
+        self._wifi_detail = ""
         logger.warning("BLE device disconnected unexpectedly")
         if self._should_run:
             self._schedule_reconnect()
@@ -213,7 +291,14 @@ class BLEClient:
                 await self._disconnect()
                 return False
             self._connected = True
+            self._device_address = str(self._client.address)
+            if isinstance(target, BLEDevice):
+                self._device_name = target.name or self._config.ble_device_name
+            else:
+                self._device_name = self._config.ble_device_name
             logger.info(f"BLE connected, write char={self._write_char.uuid}, MTU={self._client.mtu_size}")
+            # 订阅 Notify 特征，接收设备回传的 WiFi 状态（失败不影响主链路）
+            await self._subscribe_notifications()
             # 连接成功后重新同步会话看板（先清空，再下发当前所有会话）
             if self._on_connected is not None:
                 try:
@@ -240,14 +325,49 @@ class BLEClient:
                     self._write_response = "write-without-response" not in char.properties
                     return
 
+    async def _subscribe_notifications(self) -> None:
+        """订阅固件 Notify 特征（设备状态回传通道）。
+
+        旧版固件可能没有 Notify 特征或未启用通知，订阅失败仅降级为
+        “WiFi 状态未知”，不影响会话看板主链路。
+        """
+        if self._client is None:
+            return
+        try:
+            await self._client.start_notify(NOTIFY_CHAR_UUID, self._on_notification)
+            logger.info(f"Subscribed to notify char {NOTIFY_CHAR_UUID}")
+        except (BleakError, OSError) as e:
+            logger.warning(f"BLE notify subscription failed (wifi status unavailable): {e}")
+
+    def _on_notification(self, char: BleakGATTCharacteristic, data: bytearray) -> None:
+        """Notify 数据回调：解析固件回传的设备状态通知。"""
+        note = parse_device_notification(bytes(data))
+        if note is None:
+            logger.debug(f"BLE notify (unrecognized): {bytes(data)!r}")
+            return
+        if note["type"] == "wifi_status":
+            self._wifi_status = note["status"]
+            self._wifi_detail = note["detail"]
+            logger.info(f"Device WiFi status: {note['status']} {note['detail']}".rstrip())
+        elif note["type"] == "session_create":
+            logger.info(f"Device requested new session: prompt=\"{note['prompt']}\"")
+            if self._on_session_create is not None:
+                try:
+                    self._on_session_create(note["prompt"])
+                except Exception as e:
+                    logger.error(f"session_create callback error: {e}")
+
     # ------------------------------------------------------------------
     # 写入
     # ------------------------------------------------------------------
 
-    async def _write_payload(self, payload: bytes) -> None:
-        """将已编码的命令字节写入 Write 特征（串行化 + 超时保护）。"""
+    async def _write_payload(self, payload: bytes) -> bool:
+        """将已编码的命令字节写入 Write 特征（串行化 + 超时保护）。
+
+        :return: True 表示写入成功，False 表示未连接或写入失败。
+        """
         if not self.connected or not self._client or self._write_char is None:
-            return
+            return False
 
         async with self._write_lock:
             try:
@@ -256,9 +376,11 @@ class BLEClient:
                     timeout=self._config.ble_write_timeout,
                 )
                 logger.debug(f"BLE write OK ({len(payload)} bytes): {payload.decode('utf-8', 'replace')}")
+                return True
             except TimeoutError:
                 logger.error("BLE write timeout")
                 self._connected = False
             except (BleakError, OSError) as e:
                 logger.error(f"BLE write failed: {e}")
                 self._connected = False
+        return False

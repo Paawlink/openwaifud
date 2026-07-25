@@ -125,6 +125,60 @@ class DetailUpdate(BaseModel):
     timestamp: datetime = Field(default_factory=lambda: datetime.now(UTC))
 
 
+class SessionCreateRequest(BaseModel):
+    """“创建会话”请求（来自 BLE 设备通知或 HTTP 调试端点）。
+
+    守护进程收到后生成一条 :class:`PendingSessionCreate` 指令，等待 IDE 插件
+    轮询领取并在 OpenCode 中实际创建会话。
+    """
+
+    prompt: str = Field(default="", max_length=500, description="可选的首条消息/标题文本")
+
+
+class PendingSessionCreate(BaseModel):
+    """待 IDE 插件领取的“创建会话”指令。
+
+    指令定向下发给登记时最新的存活 OpenCode 实例（``instance_id``），
+    ``directory`` 解析为该实例自己上报的工作区目录（未上报时回退到
+    用户主目录），使新会话出现在目标实例自己的项目里。
+    """
+
+    request_id: str
+    instance_id: str
+    directory: str
+    prompt: str = ""
+    created_at: datetime = Field(default_factory=lambda: datetime.now(UTC))
+
+
+class ChatConfig(BaseModel):
+    """即时对话接口的模型配置（OpenAI 兼容 API）。
+
+    由网页端配置并持久化到本地文件；api_key 只写不读（GET 仅返回
+    是否已配置）。base_url 为兼容端点前缀，如 ``https://api.openai.com/v1``。
+    """
+
+    base_url: str = Field(default="", max_length=200, description="OpenAI 兼容 API 前缀")
+    api_key: str = Field(default="", max_length=200, description="API Key（只写）")
+    model: str = Field(default="", max_length=100, description="模型名，如 gpt-4o-mini")
+
+
+class ChatRequest(BaseModel):
+    """即时对话请求：单次提问，同步返回回复。"""
+
+    message: str = Field(..., min_length=1, max_length=4000, description="用户消息")
+
+
+class WifiProvisionRequest(BaseModel):
+    """WiFi 配网请求（来自网页端配网界面）。
+
+    守护进程收到后经 BLE ``W`` 命令下发到硬件设备，由设备自行连接 WiFi。
+    password 允许为空（开放网络）。
+    """
+
+    ssid: str = Field(..., min_length=1, max_length=32, description="WiFi SSID（2.4GHz）")
+    password: str = Field(default="", max_length=64, description="WiFi 密码，空表示开放网络")
+
+
 class DaemonState(BaseModel):
     """Current daemon state snapshot."""
 

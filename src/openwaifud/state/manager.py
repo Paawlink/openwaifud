@@ -16,10 +16,12 @@ from __future__ import annotations
 
 import asyncio
 import time
+import uuid
 from collections.abc import Callable, Coroutine
 from contextlib import suppress
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
+from pathlib import Path
 from typing import Any
 
 from loguru import logger
@@ -31,6 +33,7 @@ from openwaifud.models import (
     DaemonState,
     DetailUpdate,
     GlobalEventKind,
+    PendingSessionCreate,
     SessionDetail,
     SessionInfo,
     StatusUpdate,
@@ -62,6 +65,16 @@ class _SessionRuntime:
         return max(0.0, (now if now is not None else time.monotonic()) - self.started_at)
 
 
+@dataclass
+class _PluginInstance:
+    """一个存活的 OpenCode 插件实例（由轮询心跳维护）。"""
+
+    instance_id: str
+    first_seen: float
+    last_seen: float = 0.0
+    directory: str = ""
+
+
 class StateManager:
     """管理 Agent 会话状态，并通过异步队列与 BLE 同步。"""
 
@@ -87,6 +100,12 @@ class StateManager:
         self._done_linger = done_linger
         self._sweep_interval = sweep_interval
         self._sync_interval = sync_interval
+
+        # 存活的 OpenCode 插件实例注册表（instance_id -> 运行时信息），
+        # 由插件轮询“创建会话”待领取端点时顺带心跳维护。
+        self._plugin_instances: dict[str, _PluginInstance] = {}
+        # 待 IDE 插件领取的“创建会话”指令（BLE 按键 / HTTP 调试端点产生）
+        self._pending_session_creates: list[PendingSessionCreate] = []
 
     @property
     def ble_connected(self) -> bool:
@@ -214,6 +233,95 @@ class StateManager:
             }
         )
         logger.debug(f"Global event emitted: {event}")
+
+    # ------------------------------------------------------------------
+    # 创建会话（BLE 侧 -> 最新存活的 OpenCode 实例）
+    # ------------------------------------------------------------------
+
+    # 未被领取的指令超过此时长后丢弃，避免插件离线多时后重新上线时补建陈旧会话
+    _CREATE_TTL_SECONDS = 60.0
+    # 待领取队列上限（防止设备侧连续触发堆积）
+    _CREATE_QUEUE_MAX = 8
+    # 插件轮询周期为 3 秒；超过此时长未轮询视为实例已退出
+    _INSTANCE_TTL_SECONDS = 10.0
+
+    def touch_plugin_instance(self, instance_id: str, directory: str = "") -> None:
+        """登记/刷新一个 OpenCode 插件实例的心跳。
+
+        插件每次轮询待领取端点时调用；首次出现时记录注册时间，
+        用于判定“最新的实例”（注册最晚者优先）。
+        """
+        now = time.monotonic()
+        inst = self._plugin_instances.get(instance_id)
+        if inst is None:
+            inst = _PluginInstance(instance_id=instance_id, first_seen=now)
+            self._plugin_instances[instance_id] = inst
+            logger.info(f'Plugin instance registered: {instance_id} dir="{directory}"')
+        inst.last_seen = now
+        if directory:
+            inst.directory = directory
+
+    def _latest_live_instance(self) -> _PluginInstance | None:
+        """返回最新注册的存活实例；无存活实例时返回 None（顺便清理过期项）。"""
+        now = time.monotonic()
+        expired = [
+            iid
+            for iid, inst in self._plugin_instances.items()
+            if (now - inst.last_seen) > self._INSTANCE_TTL_SECONDS
+        ]
+        for iid in expired:
+            del self._plugin_instances[iid]
+            logger.debug(f"Plugin instance expired: {iid}")
+        if not self._plugin_instances:
+            return None
+        return max(self._plugin_instances.values(), key=lambda inst: inst.first_seen)
+
+    def request_session_create(self, prompt: str = "") -> PendingSessionCreate | None:
+        """登记一条“创建会话”指令（来自 BLE 通知或 HTTP 调试端点）。
+
+        指令定向下发给当前最新注册的存活 OpenCode 实例，目录解析为该
+        实例自己上报的工作区（未上报时回退用户主目录）。没有存活实例
+        时拒绝执行并返回 None，由调用方向发起侧反馈。
+        """
+        target = self._latest_live_instance()
+        if target is None:
+            logger.warning("Session create refused: no live OpenCode instance")
+            return None
+
+        request = PendingSessionCreate(
+            request_id=uuid.uuid4().hex[:12],
+            instance_id=target.instance_id,
+            directory=target.directory or str(Path.home()),
+            prompt=(prompt or "").strip(),
+        )
+        self._pending_session_creates.append(request)
+        if len(self._pending_session_creates) > self._CREATE_QUEUE_MAX:
+            dropped = self._pending_session_creates.pop(0)
+            logger.warning(f"Session-create queue full, dropped oldest request {dropped.request_id}")
+        logger.info(
+            f'Session create requested: instance={target.instance_id} '
+            f'dir="{request.directory}" prompt="{request.prompt}"'
+        )
+        return request
+
+    def claim_pending_session_creates(self, instance_id: str, directory: str = "") -> list[PendingSessionCreate]:
+        """领取定向给指定实例的未过期“创建会话”指令（兼作实例心跳）。
+
+        消费式读取：每条指令只会被领取一次，避免插件重复创建会话；
+        定向给其他实例的指令保留在队列中等待其目标领取；登记超过
+        :data:`_CREATE_TTL_SECONDS` 仍未被领取的陈旧指令直接丢弃。
+        """
+        self.touch_plugin_instance(instance_id, directory)
+
+        now = datetime.now(UTC)
+        fresh = [
+            req
+            for req in self._pending_session_creates
+            if (now - req.created_at).total_seconds() <= self._CREATE_TTL_SECONDS
+        ]
+        claimed = [req for req in fresh if req.instance_id == instance_id]
+        self._pending_session_creates = [req for req in fresh if req.instance_id != instance_id]
+        return claimed
 
     # ------------------------------------------------------------------
     # 查询
