@@ -23,6 +23,8 @@ _VOICES_URL = (
     "model-files-v1.1/voices-v1.1-zh.bin"
 )
 _CONFIG_URL = "https://huggingface.co/hexgrad/Kokoro-82M-v1.1-zh/raw/main/config.json"
+_EN_MODEL_URL = "https://github.com/thewh1teagle/kokoro-onnx/releases/download/model-files-v1.0/kokoro-v1.0.onnx"
+_EN_VOICES_URL = "https://github.com/thewh1teagle/kokoro-onnx/releases/download/model-files-v1.0/voices-v1.0.bin"
 _TARGET_SAMPLE_RATE = 16000
 
 
@@ -37,13 +39,21 @@ class SynthesizedAudio:
 
 
 class TTSService:
-    """Lazy, local Chinese TTS with replaceable model files and voice."""
+    """Lazy, local bilingual TTS with replaceable models and voices."""
 
-    def __init__(self, model_dir: str = "", voice: str = "zf_001", speed: float = 1.0) -> None:
+    def __init__(
+        self,
+        model_dir: str = "",
+        voice: str = "zf_001",
+        en_voice: str = "af_heart",
+        speed: float = 1.0,
+    ) -> None:
         self._model_dir = Path(model_dir).expanduser() if model_dir else Path.home() / ".cache/openwaifud/tts"
         self._voice = voice
+        self._en_voice = en_voice
         self._speed = speed
         self._engine: Kokoro | None = None
+        self._en_engine: Kokoro | None = None
         self._g2p: ZHG2P | None = None
         self._lock = asyncio.Lock()
 
@@ -52,6 +62,8 @@ class TTSService:
         if not text.strip():
             return SynthesizedAudio(b"")
         await self.prepare()
+        if _is_english(text) and self._en_engine is None:
+            await self._prepare_english()
         async with self._lock:
             return await asyncio.to_thread(self._synthesize_sync, text.strip())
 
@@ -63,6 +75,11 @@ class TTSService:
             engine, g2p = await asyncio.to_thread(self._prepare_sync)
             self._engine = engine
             self._g2p = g2p
+
+    async def _prepare_english(self) -> None:
+        async with self._lock:
+            if self._en_engine is None:
+                self._en_engine = await asyncio.to_thread(self._prepare_english_sync)
 
     def _prepare_sync(self) -> tuple[Kokoro, ZHG2P]:
         from kokoro_onnx import Kokoro
@@ -85,6 +102,19 @@ class TTSService:
         logger.info(f'Kokoro TTS ready: voice="{self._voice}", speed={self._speed}')
         return engine, g2p
 
+    def _prepare_english_sync(self) -> Kokoro:
+        from kokoro_onnx import Kokoro
+
+        self._model_dir.mkdir(parents=True, exist_ok=True)
+        model = self._model_dir / "kokoro-v1.0.onnx"
+        voices = self._model_dir / "voices-v1.0.bin"
+        self._download_if_missing(_EN_MODEL_URL, model)
+        self._download_if_missing(_EN_VOICES_URL, voices)
+        engine = Kokoro(str(model), str(voices))
+        if self._en_voice not in engine.get_voices():
+            raise RuntimeError(f'Kokoro English voice "{self._en_voice}" is not available')
+        return engine
+
     @staticmethod
     def _download_if_missing(url: str, destination: Path) -> None:
         if destination.is_file() and destination.stat().st_size > 0:
@@ -101,17 +131,22 @@ class TTSService:
     def _synthesize_sync(self, text: str) -> SynthesizedAudio:
         import numpy as np
 
-        engine = self._engine
+        english = _is_english(text)
+        engine = self._en_engine if english else self._engine
         g2p = self._g2p
-        if engine is None or g2p is None:
+        if engine is None or (not english and g2p is None):
             raise RuntimeError("Kokoro TTS model is not ready")
-        phonemes, _ = g2p(text)
-        samples, source_rate = engine.create(
-            phonemes,
-            voice=self._voice,
-            speed=self._speed,
-            is_phonemes=True,
-        )
+        if english:
+            samples, source_rate = engine.create(text, voice=self._en_voice, speed=self._speed, lang="en-us")
+        else:
+            assert g2p is not None
+            phonemes, _ = g2p(text)
+            samples, source_rate = engine.create(
+                phonemes,
+                voice=self._voice,
+                speed=self._speed,
+                is_phonemes=True,
+            )
         samples = np.asarray(samples, dtype=np.float32).reshape(-1)
         if source_rate != _TARGET_SAMPLE_RATE and samples.size:
             output_size = round(samples.size * _TARGET_SAMPLE_RATE / source_rate)
@@ -121,3 +156,7 @@ class TTSService:
         pcm = (np.clip(samples, -1.0, 1.0) * 32767.0).astype("<i2").tobytes()
         logger.debug(f"TTS synthesized: chars={len(text)}, pcm_bytes={len(pcm)}")
         return SynthesizedAudio(pcm)
+
+
+def _is_english(text: str) -> bool:
+    return bool(text) and not any("\u3400" <= char <= "\u9fff" for char in text)

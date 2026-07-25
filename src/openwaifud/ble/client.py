@@ -17,6 +17,7 @@ from loguru import logger
 from openwaifud.asr import ASRService, AudioRecording, AudioStreamAssembler
 from openwaifud.ble.protocol import (
     NOTIFY_CHAR_UUID,
+    TTS_PCM_CHUNK_SIZE,
     WRITE_CHAR_UUID,
     BLEProtocolError,
     encode_global_event,
@@ -36,6 +37,8 @@ from openwaifud.tts import SynthesizedAudio
 ConnectedCallback = Callable[[str], Awaitable[None]]
 ConnectionChangedCallback = Callable[[], None]
 TranscriptCallback = Callable[[str, str], Awaitable[None]]
+
+_TTS_PACING_FACTOR = 1.05
 
 
 def _encode_message(message: dict[str, Any]) -> bytes | None:
@@ -166,9 +169,15 @@ class DeviceConnection:
     async def send_tts_audio(self, audio: SynthesizedAudio) -> bool:
         if not self.connected or not audio.pcm:
             return False
+        if audio.sample_rate <= 0 or audio.sample_bits <= 0 or audio.channels <= 0:
+            logger.error(
+                f"Invalid TTS audio format for {self.device_id}: "
+                f"{audio.sample_rate} Hz, {audio.sample_bits}-bit, {audio.channels} channel(s)"
+            )
+            return False
         self._tts_stream_id = (self._tts_stream_id + 1) & 0xFFFFFFFF
         stream_id = self._tts_stream_id
-        chunk_size = 230
+        bytes_per_second = audio.sample_rate * audio.channels * audio.sample_bits / 8
         self._tts_pending += 1
         self._state_writes_allowed.clear()
         try:
@@ -179,13 +188,14 @@ class DeviceConnection:
                     )
                     if not await self._write_payload_locked(start):
                         return False
-                    for sequence, offset in enumerate(range(0, len(audio.pcm), chunk_size)):
-                        chunk = audio.pcm[offset : offset + chunk_size]
+                    loop = asyncio.get_running_loop()
+                    stream_started_at = loop.time()
+                    for sequence, offset in enumerate(range(0, len(audio.pcm), TTS_PCM_CHUNK_SIZE)):
+                        chunk = audio.pcm[offset : offset + TTS_PCM_CHUNK_SIZE]
                         if not await self._write_payload_locked(encode_tts_data(stream_id, sequence, chunk)):
                             return False
-                        await asyncio.sleep(
-                            len(chunk) / (audio.sample_rate * audio.channels * audio.sample_bits / 8) * 0.85
-                        )
+                        deadline = stream_started_at + (offset + len(chunk)) / bytes_per_second * _TTS_PACING_FACTOR
+                        await asyncio.sleep(max(0, deadline - loop.time()))
                     if not await self._write_payload_locked(encode_tts_end(stream_id, len(audio.pcm))):
                         return False
                     logger.info(f"TTS audio sent to {self.device_id}: stream={stream_id}, pcm_bytes={len(audio.pcm)}")
@@ -290,7 +300,7 @@ class DeviceConnection:
             for char in service.characteristics:
                 if char.uuid and char.uuid.lower() == target:
                     self._write_char = char
-                    self._write_response = "write-without-response" not in char.properties
+                    self._write_response = "write" in char.properties
                     return
 
     async def _subscribe_notifications(self) -> None:

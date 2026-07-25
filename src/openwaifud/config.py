@@ -32,6 +32,7 @@ class Config:
     # Local text-to-speech
     tts_model_dir: str = field(default_factory=lambda: os.getenv("OPENWAIFUD_TTS_MODEL_DIR", ""))
     tts_voice: str = field(default_factory=lambda: os.getenv("OPENWAIFUD_TTS_VOICE", "zf_001"))
+    tts_en_voice: str = field(default_factory=lambda: os.getenv("OPENWAIFUD_TTS_EN_VOICE", "af_heart"))
     tts_speed: float = field(default_factory=lambda: float(os.getenv("OPENWAIFUD_TTS_SPEED", "1.0")))
 
     # Logging

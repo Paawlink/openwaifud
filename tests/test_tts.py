@@ -31,6 +31,20 @@ def test_tts_resamples_and_converts_to_pcm():
     assert samples[0] == -32767
 
 
+def test_english_tts_uses_english_model_and_voice():
+    class FakeEngine:
+        def create(self, text, **kwargs):
+            assert text == "Hello, OpenWaifu!"
+            assert kwargs == {"voice": "af_heart", "speed": 1.0, "lang": "en-us"}
+            return np.array([0.0], dtype=np.float32), 16000
+
+    service = TTSService()
+    service._en_engine = FakeEngine()
+    audio = service._synthesize_sync("Hello, OpenWaifu!")
+
+    assert audio.pcm == b"\x00\x00"
+
+
 def test_chinese_g2p_preserves_english_words():
     from misaki import zh
 

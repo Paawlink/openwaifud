@@ -31,25 +31,13 @@ _PERSONA = """\
 的"状态播报员"。
 
 对话规则：
-1. 用户通过语音与你交谈，你的回复会被语音合成朗读。回复必须是口语化的简体中文短句，\
-通常不超过两三句话，禁止使用 Markdown、列表符号、表情符号或代码块。
+1. 用户通过语音与你交谈，你的回复会被语音合成朗读。回复必须使用用户的语言，控制在48个字符以内，\
+禁止使用 Markdown、列表符号、表情符号或代码块。
 2. 用户询问工作状态或细节（比如"现在在忙什么""任务跑完了吗""在哪个项目里干活"\
 "刚才 Agent 聊了什么"）时，依据下方的实时状态概览如实回答，包括会话的工作目录、\
 元数据和最近对话摘要；概览里没有的信息不要编造。
 3. 会话出错时先安抚再简述错误；一切空闲时可以轻松地陪主人闲聊。
 4. 保持亲切、活泼、简洁，像一只懂技术的小桌宠。"""
-
-
-def _format_elapsed(seconds: float) -> str:
-    """把秒数转成口语化时长（如"45秒""3分钟""1小时12分"）。"""
-    total = int(seconds)
-    if total < 60:
-        return f"{total}秒"
-    minutes, _ = divmod(total, 60)
-    if minutes < 60:
-        return f"{minutes}分钟"
-    hours, minutes = divmod(minutes, 60)
-    return f"{hours}小时{minutes}分"
 
 
 # 常见元数据键 -> 口语化中文标签（其余键原样展示）
@@ -72,7 +60,6 @@ def _format_session(index: int, session: SessionInfo) -> str:
     status = _STATUS_LABELS.get(session.status, session.status.value)
     parts = [
         f"{index}. 来自 {session.plugin_type} 的会话，状态：{status}",
-        f"已运行 {_format_elapsed(session.elapsed_seconds)}",
     ]
     if session.current_task:
         parts.append(f"当前任务：{session.current_task}")
@@ -102,8 +89,6 @@ def _render_state(state: DaemonState, details: list[SessionDetail] | None = None
     overall = _STATUS_LABELS.get(state.agent_status, state.agent_status.value)
     lines = [
         f"总体状态：{overall}",
-        f"与开发板的蓝牙连接：{'已连接' if state.ble_connected else '未连接'}",
-        f"守护进程已运行：{_format_elapsed(state.uptime_seconds)}",
     ]
     detail_map = {d.session_id: d for d in (details or [])}
     if state.sessions:

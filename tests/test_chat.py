@@ -191,9 +191,15 @@ class TestSystemPrompt:
         state = DaemonState(ble_connected=True, uptime_seconds=90.0)
         prompt = build_system_prompt(state)
         assert "总体状态：空闲" in prompt
-        assert "已连接" in prompt
-        assert "1分钟" in prompt
+        assert "蓝牙连接" not in prompt
+        assert "守护进程已运行" not in prompt
+        assert "1分钟" not in prompt
         assert "暂无" in prompt
+
+    def test_prompt_requires_matching_language_and_short_reply(self):
+        prompt = build_system_prompt(None)
+        assert "使用用户的语言" in prompt
+        assert "48个字符以内" in prompt
 
     def test_sessions_rendered_with_task_and_error(self):
         state = DaemonState(
@@ -219,6 +225,7 @@ class TestSystemPrompt:
         assert "总体状态：编写代码中" in prompt
         assert "共 2 个" in prompt
         assert "来自 opencode 的会话" in prompt
+        assert "已运行" not in prompt
         assert "当前任务：重构登录模块" in prompt
         assert "错误信息：编译失败" in prompt
 
@@ -405,6 +412,18 @@ class TestChatHistory:
         assert second_messages[1]["content"] == "第一句"
         assert second_messages[2]["content"] == "回复1"
         assert second_messages[3]["content"] == "第二句"
+
+    async def test_reply_is_trimmed_to_48_characters(self, tmp_path, aiohttp_server):
+        async def completions(request: web.Request) -> web.Response:
+            return web.json_response({"choices": [{"message": {"content": "x" * 60}}]})
+
+        upstream = web.Application()
+        upstream.router.add_post("/v1/chat/completions", completions)
+        server = await aiohttp_server(upstream)
+        service = ChatService(config_path=tmp_path / "chat.json")
+        service.save_config(ChatConfig(base_url=f"http://{server.host}:{server.port}/v1", model="m"))
+
+        assert await service.chat("hi") == "x" * 48
 
 
 class TestChatDisabled:

@@ -30,6 +30,7 @@ from openwaifud.models import ChatConfig, DaemonState, SessionDetail
 _REQUEST_TIMEOUT_SECONDS = 120.0
 # 保留的历史消息上限（user/assistant 各算一条），支撑自然的多轮闲聊
 _HISTORY_MAX_MESSAGES = 20
+_MAX_REPLY_CHARS = 48
 
 
 class ChatNotConfiguredError(Exception):
@@ -136,6 +137,7 @@ class ChatService:
         reply = assistant.get("content")
         if not isinstance(reply, str) or not reply.strip():
             raise ChatUpstreamError("上游响应缺少文本内容")
+        reply = reply.strip()[:_MAX_REPLY_CHARS]
 
         # 持久化本轮文本回合，并裁剪历史上限
         self._history.append({"role": "user", "content": message})
