@@ -190,13 +190,6 @@
   button:hover:not(:disabled) { opacity: 0.9; }
   button:active:not(:disabled) { transform: scale(0.98); }
   button:disabled { opacity: 0.5; cursor: not-allowed; }
-  .btn-row { display: flex; gap: 12px; }
-  .btn-row button { flex: 1; }
-  button.danger {
-    background: transparent;
-    border: 1px solid var(--err);
-    color: var(--err);
-  }
   .form-msg { font-size: 13px; min-height: 18px; color: var(--muted); }
   .form-msg.ok { color: var(--ok); }
   .form-msg.err { color: var(--err); }
@@ -299,10 +292,6 @@
         设备总览
         <span id="nav-device-count" class="nav-badge">0</span>
       </button>
-      <button class="nav-item" data-tab="wifi">
-        <svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M5 12.55a11 11 0 0 1 14.08 0"/><path d="M8.53 16.11a6 6 0 0 1 6.95 0"/><circle cx="12" cy="20" r="1"/></svg>
-        WiFi 配网
-      </button>
       <button class="nav-item" data-tab="chat">
         <svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/></svg>
         即时对话
@@ -320,35 +309,10 @@
     <section id="tab-devices" class="tab active">
       <div class="page-head">
         <h1>设备总览</h1>
-        <p>已通过蓝牙连接的硬件设备及其 WiFi 状态，每 2 秒自动刷新</p>
+        <p>已通过蓝牙连接的硬件设备，每 2 秒自动刷新</p>
       </div>
       <div class="card">
         <div id="devices"><p class="empty">加载中…</p></div>
-      </div>
-    </section>
-
-    <!-- ========== WiFi 配网 ========== -->
-    <section id="tab-wifi" class="tab">
-      <div class="page-head">
-        <h1>WiFi 配网</h1>
-        <p>通过蓝牙向设备下发 WiFi 凭据，或让设备忘记已保存的网络</p>
-      </div>
-      <div class="card">
-        <form id="provision-form">
-          <div>
-            <label for="ssid">WiFi 名称（SSID）</label>
-            <input id="ssid" name="ssid" maxlength="32" required autocomplete="off" placeholder="例如 MyHomeWiFi">
-          </div>
-          <div>
-            <label for="password">WiFi 密码（开放网络可留空）</label>
-            <input id="password" name="password" type="password" maxlength="64" autocomplete="off" placeholder="密码">
-          </div>
-          <div class="btn-row">
-            <button id="submit-btn" type="submit">下发配网</button>
-            <button id="forget-btn" type="button" class="danger">忘记网络</button>
-          </div>
-          <p id="msg" class="form-msg"></p>
-        </form>
       </div>
     </section>
 
@@ -424,15 +388,6 @@ if (location.hash) switchTab(location.hash.slice(1));
 
 /* ---------- 设备列表 ---------- */
 
-const WIFI_LABELS = {
-  unknown: ["未知", ""],
-  idle: ["WiFi 未配置", ""],
-  connecting: ["WiFi 连接中…", "warn"],
-  connected: ["WiFi 已连接", "ok"],
-  failed: ["WiFi 连接失败", "err"],
-  disconnected: ["WiFi 已断开", "err"],
-};
-
 function esc(s) {
   return String(s).replace(/[&<>"']/g, c => ({
     "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;",
@@ -457,9 +412,6 @@ async function refreshDevices() {
       const ble = d.ble_connected
         ? '<span class="badge ok">蓝牙已连接</span>'
         : '<span class="badge err">蓝牙未连接</span>';
-      const [label, cls] = WIFI_LABELS[d.wifi_status] || WIFI_LABELS.unknown;
-      const detail = d.wifi_status === "connected" && d.wifi_detail
-        ? " (" + esc(d.wifi_detail) + ")" : "";
       return '<div class="device">' +
         '<div class="device-info">' +
           '<span class="device-dot' + (d.ble_connected ? " on" : "") + '"></span>' +
@@ -468,78 +420,13 @@ async function refreshDevices() {
             '<div class="device-addr">' + esc(d.address || "-") + '</div>' +
           '</div>' +
         '</div>' +
-        '<div class="badges">' + ble +
-          '<span class="badge ' + cls + '">' + label + detail + '</span>' +
-        '</div>' +
+        '<div class="badges">' + ble + '</div>' +
       '</div>';
     }).join("");
   } catch (e) {
     /* 网络抖动时保留上次内容 */
   }
 }
-
-/* ---------- WiFi 配网 ---------- */
-
-document.getElementById("provision-form").addEventListener("submit", async (ev) => {
-  ev.preventDefault();
-  const btn = document.getElementById("submit-btn");
-  const msg = document.getElementById("msg");
-  btn.disabled = true;
-  msg.className = "form-msg";
-  msg.textContent = "下发中…";
-  try {
-    const resp = await fetch("/api/v1/wifi/provision", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        ssid: document.getElementById("ssid").value,
-        password: document.getElementById("password").value,
-      }),
-    });
-    const data = await resp.json();
-    if (resp.ok) {
-      msg.className = "form-msg ok";
-      msg.textContent = "已下发配网指令，设备正在连接 WiFi…";
-    } else {
-      msg.className = "form-msg err";
-      msg.textContent = data.error || ("下发失败（HTTP " + resp.status + "）");
-    }
-  } catch (e) {
-    msg.className = "form-msg err";
-    msg.textContent = "请求失败，请检查守护进程是否运行";
-  } finally {
-    btn.disabled = false;
-    refreshDevices();
-  }
-});
-
-document.getElementById("forget-btn").addEventListener("click", async () => {
-  if (!confirm("确定要让设备忘记当前网络吗？\n设备将断开 WiFi 并清除已保存的凭据。")) {
-    return;
-  }
-  const btn = document.getElementById("forget-btn");
-  const msg = document.getElementById("msg");
-  btn.disabled = true;
-  msg.className = "form-msg";
-  msg.textContent = "下发中…";
-  try {
-    const resp = await fetch("/api/v1/wifi/forget", { method: "POST" });
-    const data = await resp.json();
-    if (resp.ok) {
-      msg.className = "form-msg ok";
-      msg.textContent = "已下发忘记网络指令，设备将断开 WiFi 并清除凭据";
-    } else {
-      msg.className = "form-msg err";
-      msg.textContent = data.error || ("下发失败（HTTP " + resp.status + "）");
-    }
-  } catch (e) {
-    msg.className = "form-msg err";
-    msg.textContent = "请求失败，请检查守护进程是否运行";
-  } finally {
-    btn.disabled = false;
-    refreshDevices();
-  }
-});
 
 refreshDevices();
 setInterval(refreshDevices, 2000);

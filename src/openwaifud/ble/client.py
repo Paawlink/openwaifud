@@ -10,7 +10,7 @@
 - 固定间隔自动重连（默认每 5 秒一次，不使用退避策略）；
 - 使用 asyncio.Lock 串行化写入；
 - 订阅固件 Notify 特征（:data:`~openwaifud.ble.protocol.NOTIFY_CHAR_UUID`），
-  接收设备回传的 WiFi 状态并缓存，供网页端配网界面查询；
+  接收设备回传的语音录音数据；
 - 优雅降级：写入失败仅记录日志，不向上抛出异常。
 """
 
@@ -37,13 +37,14 @@ from openwaifud.ble.protocol import (
     encode_session_upsert,
     encode_sync_begin,
     encode_sync_end,
-    encode_wifi_forget,
-    encode_wifi_provision,
+    encode_tts_data,
+    encode_tts_end,
+    encode_tts_start,
     parse_audio_notification,
-    parse_device_notification,
 )
 from openwaifud.config import Config
 from openwaifud.models import AgentStatus, GlobalEventKind
+from openwaifud.tts import SynthesizedAudio
 
 
 class BLEClient:
@@ -63,21 +64,15 @@ class BLEClient:
         # 已连接设备信息（供网页端设备列表展示）
         self._device_name: str = ""
         self._device_address: str = ""
-        # 固件经 Notify 特征回传的 WiFi 状态（unknown 表示尚未收到任何通知）
-        self._wifi_status: str = "unknown"
-        self._wifi_detail: str = ""
         self._audio_assembler = AudioStreamAssembler()
         self._asr_service = ASRService(model_name=config.asr_model, language=config.asr_language)
         self._asr_tasks: set[asyncio.Task[str]] = set()
+        self._on_transcript: Callable[[str], Coroutine[Any, Any, None]] | None = None
+        self._tts_stream_id = 0
 
     @property
     def connected(self) -> bool:
         return self._connected and self._client is not None and self._client.is_connected
-
-    @property
-    def wifi_status(self) -> str:
-        """设备最近上报的 WiFi 状态（unknown/idle/connecting/connected/failed/disconnected）。"""
-        return self._wifi_status
 
     def get_devices(self) -> list[dict[str, Any]]:
         """返回当前已知硬件设备的快照列表（供网页端设备列表展示）。
@@ -92,54 +87,63 @@ class BLEClient:
                 "name": name,
                 "address": address,
                 "ble_connected": self.connected,
-                "wifi_status": self._wifi_status if self.connected else "unknown",
-                "wifi_detail": self._wifi_detail if self.connected else "",
             }
         ]
-
-    async def send_wifi_provision(self, ssid: str, password: str) -> bool:
-        """向设备下发 WiFi 配网命令（W|ssid|password）。
-
-        :return: True 表示已成功写入 BLE；False 表示未连接或写入失败。
-        :raises BLEProtocolError: 凭据为空或编码后超长。
-        """
-        if not self.connected:
-            return False
-
-        payload = encode_wifi_provision(ssid, password)
-        ok = await self._write_payload(payload)
-        if ok:
-            # 乐观置为连接中，固件随后会经 Notify 回传真实状态
-            self._wifi_status = "connecting"
-            self._wifi_detail = ""
-            logger.info(f'WiFi provision sent: ssid="{ssid}"')
-        return ok
-
-    async def send_wifi_forget(self) -> bool:
-        """向设备下发“忘记网络”命令（F）：断开 WiFi 并清除已存凭据。
-
-        :return: True 表示已成功写入 BLE；False 表示未连接或写入失败。
-        """
-        if not self.connected:
-            return False
-
-        ok = await self._write_payload(encode_wifi_forget())
-        if ok:
-            # 乐观置为未配置，固件随后会经 Notify 回传真实状态
-            self._wifi_status = "idle"
-            self._wifi_detail = ""
-            logger.info("WiFi forget sent")
-        return ok
 
     def set_on_connected(self, callback: Callable[[], Coroutine[Any, Any, None]]) -> None:
         """注册连接成功回调，用于在（重）连后重新同步会话看板。"""
         self._on_connected = callback
 
+    def set_on_transcript(self, callback: Callable[[str], Coroutine[Any, Any, None]]) -> None:
+        """Register the daemon's Agent/TTS handler for recognized speech."""
+        self._on_transcript = callback
+
+    async def send_tts_audio(self, audio: SynthesizedAudio) -> bool:
+        """Send synthesized PCM to the device speaker as one ordered stream."""
+        if not self.connected or not audio.pcm:
+            return False
+
+        self._tts_stream_id = (self._tts_stream_id + 1) & 0xFFFFFFFF
+        stream_id = self._tts_stream_id
+        chunk_size = 230
+        async with self._write_lock:
+            try:
+                start = encode_tts_start(
+                    stream_id,
+                    len(audio.pcm),
+                    audio.sample_rate,
+                    audio.sample_bits,
+                    audio.channels,
+                )
+                if not await self._write_payload_locked(start):
+                    return False
+                for sequence, offset in enumerate(range(0, len(audio.pcm), chunk_size)):
+                    packet = encode_tts_data(stream_id, sequence, audio.pcm[offset : offset + chunk_size])
+                    if not await self._write_payload_locked(packet):
+                        return False
+                    # Send faster than playback so the device can maintain a
+                    # prebuffer despite BLE scheduling jitter.
+                    await asyncio.sleep(
+                        len(audio.pcm[offset : offset + chunk_size])
+                        / (audio.sample_rate * audio.channels * audio.sample_bits / 8)
+                        * 0.85
+                    )
+                if not await self._write_payload_locked(encode_tts_end(stream_id, len(audio.pcm))):
+                    return False
+                logger.info(f"TTS audio sent: stream={stream_id}, pcm_bytes={len(audio.pcm)}")
+                return True
+            except Exception as e:
+                logger.error(f"TTS BLE stream failed: {e}")
+                return False
+
     async def start(self) -> None:
         """启动 BLE 客户端并尝试首次连接。"""
         self._should_run = True
-        await self._asr_service.prepare()
         await self._connect()
+
+    async def prepare_asr(self) -> None:
+        """Preload ASR without coupling model readiness to BLE startup."""
+        await self._asr_service.prepare()
 
     async def stop(self) -> None:
         """停止 BLE 客户端并断开连接。"""
@@ -250,8 +254,6 @@ class BLEClient:
         """设备意外断开时的回调。"""
         self._connected = False
         self._write_char = None
-        self._wifi_status = "unknown"
-        self._wifi_detail = ""
         self._audio_assembler.reset()
         logger.warning("BLE device disconnected unexpectedly")
         if self._should_run:
@@ -300,7 +302,7 @@ class BLEClient:
             else:
                 self._device_name = self._config.ble_device_name
             logger.info(f"BLE connected, write char={self._write_char.uuid}, MTU={self._client.mtu_size}")
-            # 订阅 Notify 特征，接收设备回传的 WiFi 状态（失败不影响主链路）
+            # 订阅 Notify 特征，接收设备回传的语音录音（失败不影响主链路）
             await self._subscribe_notifications()
             # 连接成功后重新同步会话看板（先清空，再下发当前所有会话）
             if self._on_connected is not None:
@@ -329,10 +331,10 @@ class BLEClient:
                     return
 
     async def _subscribe_notifications(self) -> None:
-        """订阅固件 Notify 特征（设备状态回传通道）。
+        """订阅固件 Notify 特征（设备音频回传通道）。
 
         旧版固件可能没有 Notify 特征或未启用通知，订阅失败仅降级为
-        “WiFi 状态未知”，不影响会话看板主链路。
+        无语音上行能力，不影响会话看板主链路。
         """
         if self._client is None:
             return
@@ -340,10 +342,10 @@ class BLEClient:
             await self._client.start_notify(NOTIFY_CHAR_UUID, self._on_notification)
             logger.info(f"Subscribed to notify char {NOTIFY_CHAR_UUID}")
         except (BleakError, OSError) as e:
-            logger.warning(f"BLE notify subscription failed (wifi status unavailable): {e}")
+            logger.warning(f"BLE notify subscription failed (voice input unavailable): {e}")
 
     def _on_notification(self, char: BleakGATTCharacteristic, data: bytearray) -> None:
-        """Notify 数据回调：解析固件回传的设备状态通知。"""
+        """Notify 数据回调：解析固件回传的音频包。"""
         payload = bytes(data)
         try:
             audio_packet = parse_audio_notification(payload)
@@ -367,19 +369,15 @@ class BLEClient:
                 task.add_done_callback(self._asr_tasks.discard)
             return
 
-        note = parse_device_notification(payload)
-        if note is None:
-            logger.debug(f"BLE notify (unrecognized): {payload!r}")
-            return
-        if note["type"] == "wifi_status":
-            self._wifi_status = note["status"]
-            self._wifi_detail = note["detail"]
-            logger.info(f"Device WiFi status: {note['status']} {note['detail']}".rstrip())
+        logger.debug(f"BLE notify (unrecognized): {payload!r}")
 
     async def _transcribe_recording(self, recording: AudioRecording) -> str:
         """Run ASR while containing model download and inference failures."""
         try:
-            return await self._asr_service.transcribe(recording)
+            text = await self._asr_service.transcribe(recording)
+            if text and self._on_transcript is not None:
+                await self._on_transcript(text)
+            return text
         except Exception as e:
             logger.exception(f"ASR transcription failed: {e}")
             return ""
@@ -397,17 +395,23 @@ class BLEClient:
             return False
 
         async with self._write_lock:
-            try:
-                await asyncio.wait_for(
-                    self._client.write_gatt_char(self._write_char, payload, response=self._write_response),
-                    timeout=self._config.ble_write_timeout,
-                )
-                logger.debug(f"BLE write OK ({len(payload)} bytes): {payload.decode('utf-8', 'replace')}")
-                return True
-            except TimeoutError:
-                logger.error("BLE write timeout")
-                self._connected = False
-            except (BleakError, OSError) as e:
-                logger.error(f"BLE write failed: {e}")
-                self._connected = False
+            return await self._write_payload_locked(payload)
+
+    async def _write_payload_locked(self, payload: bytes) -> bool:
+        """Write one packet while the caller owns ``_write_lock``."""
+        if not self.connected or not self._client or self._write_char is None:
+            return False
+        try:
+            await asyncio.wait_for(
+                self._client.write_gatt_char(self._write_char, payload, response=self._write_response),
+                timeout=self._config.ble_write_timeout,
+            )
+            logger.debug(f"BLE write OK ({len(payload)} bytes)")
+            return True
+        except TimeoutError:
+            logger.error("BLE write timeout")
+            self._connected = False
+        except (BleakError, OSError) as e:
+            logger.error(f"BLE write failed: {e}")
+            self._connected = False
         return False

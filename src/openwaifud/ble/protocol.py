@@ -21,27 +21,14 @@
 详情    ``D|<sid>|<kind>|<seq>|<text>``                 会话详情数据（错误/元数据/聊天上下文）
 结束    ``E``                                           快照同步结束（固件移除本轮未再出现的会话）
 事件    ``G|<ev>|<detail>``                             全局事件（``ev`` 见 :data:`GLOBAL_EVENT_CHARS`）
-配网    ``W|<ssid>|<password>``                         WiFi 配网（ssid/password 采用百分号编码）
-忘网    ``F``                                           忘记网络（断开 WiFi 并清除设备侧保存的凭据）
 ======  ==============================================  ================================
 
 其中 ``<st>`` 为单字符状态码（见 :data:`STATUS_CHARS`），``<elapsed>`` 为该会话
 已运行的整数秒数（固件收到后在本地按秒继续跳动）。字段以 ``|`` 分隔，因此
 ``sid`` / ``task`` / ``detail`` 中的 ``|``、换行等字符会在编码前被替换为空格。
 
-WiFi 配网命令的 ``ssid`` / ``password`` 不能有损清洗（密码里的 ``|`` 等字符必须
-原样送达），因此采用**百分号编码**：``%`` -> ``%25``、``|`` -> ``%7C``、
-CR -> ``%0D``、LF -> ``%0A``，固件侧做对应的 ``%XX`` 解码。
-
-此外固件通过 Notify 特征（:data:`NOTIFY_CHAR_UUID`）向守护进程回传设备状态，
-同样为单行 UTF-8 文本：
-
-======  ==============================================  ================================
-通知    格式                                             含义
-======  ==============================================  ================================
-WiFi    ``W|<st>|<detail>``                             WiFi 状态（``st`` 见 :data:`WIFI_STATUS_CHARS`，
-                                                        已连接时 ``detail`` 为 IP 地址）
-======  ==============================================  ================================
+此外固件通过 Notify 特征（:data:`NOTIFY_CHAR_UUID`）向守护进程回传带 ``OWA``
+魔数的二进制音频包（见 :func:`parse_audio_notification`）。
 """
 
 from __future__ import annotations
@@ -68,6 +55,11 @@ AUDIO_MAGIC = b"OWA"
 AUDIO_PACKET_START = 1
 AUDIO_PACKET_DATA = 2
 AUDIO_PACKET_END = 3
+TTS_MAGIC = b"OWT"
+TTS_PACKET_START = 1
+TTS_PACKET_DATA = 2
+TTS_PACKET_END = 3
+TTS_PCM_CHUNK_SIZE = MAX_PAYLOAD - 10
 
 
 @dataclass(frozen=True)
@@ -94,6 +86,31 @@ class AudioEndPacket:
 
 AudioPacket = AudioStartPacket | AudioDataPacket | AudioEndPacket
 
+
+def encode_tts_start(
+    stream_id: int,
+    pcm_bytes: int,
+    sample_rate: int = 16000,
+    sample_bits: int = 16,
+    channels: int = 1,
+) -> bytes:
+    """Encode the start of a daemon-to-device TTS PCM stream."""
+    return TTS_MAGIC + bytes([TTS_PACKET_START]) + struct.pack(
+        "<IIHBB", stream_id, pcm_bytes, sample_rate, sample_bits, channels
+    )
+
+
+def encode_tts_data(stream_id: int, sequence: int, pcm: bytes) -> bytes:
+    """Encode one ordered TTS PCM chunk."""
+    if not pcm or len(pcm) > TTS_PCM_CHUNK_SIZE:
+        raise BLEProtocolError(f"Invalid TTS PCM chunk length: {len(pcm)}")
+    return TTS_MAGIC + bytes([TTS_PACKET_DATA]) + struct.pack("<IH", stream_id, sequence) + pcm
+
+
+def encode_tts_end(stream_id: int, pcm_bytes: int) -> bytes:
+    """Encode the end of a daemon-to-device TTS PCM stream."""
+    return TTS_MAGIC + bytes([TTS_PACKET_END]) + struct.pack("<II", stream_id, pcm_bytes)
+
 # 字段分隔符与命令前缀
 FIELD_SEP = "|"
 CMD_UPSERT = "S"
@@ -101,8 +118,6 @@ CMD_SYNC_BEGIN = "B"
 CMD_SYNC_END = "E"
 CMD_GLOBAL = "G"
 CMD_DETAIL = "D"
-CMD_WIFI = "W"
-CMD_WIFI_FORGET = "F"
 
 # 详情数据类型码（D 命令的 <kind> 字段）
 DETAIL_ERROR = "0"  # 错误信息
@@ -123,15 +138,6 @@ GLOBAL_EVENT_CHARS: dict[GlobalEventKind, str] = {
     GlobalEventKind.ERROR: "E",
     GlobalEventKind.CANCEL: "X",
     GlobalEventKind.DONE: "D",
-}
-
-# 固件 Notify 回传的 WiFi 状态码 -> 可读状态字符串
-WIFI_STATUS_CHARS: dict[str, str] = {
-    "I": "idle",          # 未配置
-    "C": "connecting",    # 连接中
-    "G": "connected",     # 已连接（拿到 IP）
-    "F": "failed",        # 连接失败
-    "D": "disconnected",  # 已断开
 }
 
 
@@ -175,20 +181,6 @@ def global_event_char(kind: GlobalEventKind) -> str:
     return GLOBAL_EVENT_CHARS.get(kind, "E")
 
 
-def _escape_wifi_field(text: str) -> str:
-    """对 WiFi 凭据字段做百分号编码（无损，固件侧做 %XX 解码）。
-
-    仅编码会破坏命令行解析的字符：``%``（转义前缀本身）、``|``（字段分隔符）、
-    回车与换行。其余字节（含多字节 UTF-8）原样保留。
-    """
-    return (
-        text.replace("%", "%25")
-        .replace(FIELD_SEP, "%7C")
-        .replace("\r", "%0D")
-        .replace("\n", "%0A")
-    )
-
-
 def _encode_line(text: str) -> bytes:
     """将整行命令编码为 UTF-8，超长时按字符边界安全截断。"""
     payload = text.encode("utf-8")
@@ -200,62 +192,6 @@ def _encode_line(text: str) -> bytes:
 # ---------------------------------------------------------------------------
 # 命令编码
 # ---------------------------------------------------------------------------
-
-
-def encode_wifi_provision(ssid: str, password: str) -> bytes:
-    """编码“WiFi 配网”命令：``W|<ssid>|<password>``。
-
-    ssid/password 经百分号编码后原样传输（不能像其他命令那样有损清洗），
-    超出 :data:`MAX_PAYLOAD` 预算时抛出 :class:`BLEProtocolError`（凭据
-    截断后连接必然失败，不如显式报错）。
-    """
-    if not ssid:
-        raise BLEProtocolError("SSID must not be empty")
-
-    line = f"{CMD_WIFI}{FIELD_SEP}{_escape_wifi_field(ssid)}{FIELD_SEP}{_escape_wifi_field(password)}"
-    payload = line.encode("utf-8")
-    if len(payload) > MAX_PAYLOAD:
-        raise BLEProtocolError(f"WiFi credentials too long ({len(payload)} > {MAX_PAYLOAD} bytes)")
-    return payload
-
-
-def encode_wifi_forget() -> bytes:
-    """编码“忘记网络”命令：``F``。
-
-    固件收到后断开当前 WiFi 连接、删除 KV 中持久化的凭据，并经 Notify
-    回传 ``W|I|``（回到未配置状态）。
-    """
-    return CMD_WIFI_FORGET.encode("utf-8")
-
-
-def parse_device_notification(payload: bytes) -> dict[str, str] | None:
-    """解析固件经 Notify 特征回传的单行通知。
-
-    目前仅支持 WiFi 状态 ``W|<st>|<detail>``，返回形如
-    ``{"type": "wifi_status", "status": "connected", "detail": "192.168.1.5"}``。
-
-    无法识别的通知返回 None。
-    """
-    try:
-        line = payload.decode("utf-8").strip()
-    except UnicodeDecodeError:
-        return None
-
-    if not line:
-        return None
-
-    parts = line.split(FIELD_SEP, 2)
-    if len(parts) < 2 or parts[0] != CMD_WIFI:
-        return None
-
-    status = WIFI_STATUS_CHARS.get(parts[1])
-    if status is None:
-        return None
-    return {
-        "type": "wifi_status",
-        "status": status,
-        "detail": parts[2] if len(parts) > 2 else "",
-    }
 
 
 def parse_audio_notification(payload: bytes) -> AudioPacket | None:

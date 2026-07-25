@@ -3,14 +3,16 @@
 from __future__ import annotations
 
 import asyncio
+from collections.abc import Awaitable, Callable
 
 from loguru import logger
 
 from openwaifud.api.server import HTTPServer
 from openwaifud.ble.client import BLEClient
-from openwaifud.chat import ChatService
+from openwaifud.chat import ChatNotConfiguredError, ChatService, ChatUpstreamError
 from openwaifud.config import Config
 from openwaifud.state.manager import StateManager
+from openwaifud.tts import TTSService
 
 
 class OpenWaifuDaemon:
@@ -30,6 +32,11 @@ class OpenWaifuDaemon:
             state_provider=self._state_manager.get_current_state,
             details_provider=self._state_manager.list_session_details,
         )
+        self._tts_service = TTSService(
+            model_dir=config.tts_model_dir,
+            voice=config.tts_voice,
+            speed=config.tts_speed,
+        )
         self._http_server = HTTPServer(
             state_manager=self._state_manager,
             host=config.http_host,
@@ -38,6 +45,7 @@ class OpenWaifuDaemon:
             chat_service=self._chat_service,
         )
         self._shutdown_event = asyncio.Event()
+        self._model_load_tasks: set[asyncio.Task[None]] = set()
 
     async def run(self) -> None:
         """Run the daemon until shutdown signal."""
@@ -60,6 +68,7 @@ class OpenWaifuDaemon:
         self._state_manager.set_ble_callback(self._ble_client.handle_message)
         # BLE（重）连接后由状态管理器重新同步会话看板
         self._ble_client.set_on_connected(self._state_manager.resync_ble)
+        self._ble_client.set_on_transcript(self._handle_voice_message)
 
         # Start state consumer (background queue processing)
         await self._state_manager.start_consumer()
@@ -72,6 +81,11 @@ class OpenWaifuDaemon:
 
         # Start HTTP server
         await self._http_server.start()
+
+        # Model downloads and warm-up are intentionally outside the startup
+        # critical path. First use still waits for the same guarded prepare call.
+        self._start_model_preload("ASR", self._ble_client.prepare_asr)
+        self._start_model_preload("TTS", self._tts_service.prepare)
 
         logger.info(f"OpenWaifuD running - HTTP: http://{self._config.http_host}:{self._config.http_port}")
 
@@ -88,4 +102,37 @@ class OpenWaifuDaemon:
         # 3. Disconnect BLE
         await self._ble_client.stop()
 
+        for task in self._model_load_tasks:
+            task.cancel()
+        if self._model_load_tasks:
+            await asyncio.gather(*self._model_load_tasks, return_exceptions=True)
+
         logger.info("OpenWaifuD daemon stopped")
+
+    def _start_model_preload(self, name: str, prepare: Callable[[], Awaitable[None]]) -> None:
+        task = asyncio.create_task(self._preload_model(name, prepare), name=f"preload-{name.lower()}")
+        self._model_load_tasks.add(task)
+        task.add_done_callback(self._model_load_tasks.discard)
+
+    @staticmethod
+    async def _preload_model(name: str, prepare: Callable[[], Awaitable[None]]) -> None:
+        try:
+            await prepare()
+        except asyncio.CancelledError:
+            raise
+        except Exception as e:
+            logger.exception(f"{name} model preload failed; first use will retry: {e}")
+
+    async def _handle_voice_message(self, message: str) -> None:
+        """Run recognized speech through the internal Agent, TTS, and device speaker."""
+        logger.info(f'Voice message: "{message}"')
+        try:
+            reply = await self._chat_service.chat(message)
+            logger.info(f'Agent voice reply: "{reply}"')
+            audio = await self._tts_service.synthesize(reply)
+            if not await self._ble_client.send_tts_audio(audio):
+                logger.error("Unable to send TTS audio to device")
+        except (ChatNotConfiguredError, ChatUpstreamError) as e:
+            logger.error(f"Voice Agent unavailable: {e}")
+        except Exception as e:
+            logger.exception(f"Voice response pipeline failed: {e}")

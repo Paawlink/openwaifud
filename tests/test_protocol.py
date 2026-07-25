@@ -10,7 +10,6 @@ from openwaifud.ble.protocol import (
     CMD_DETAIL,
     CMD_GLOBAL,
     CMD_UPSERT,
-    CMD_WIFI,
     DETAIL_CHAT,
     DETAIL_ERROR,
     DETAIL_META,
@@ -28,11 +27,11 @@ from openwaifud.ble.protocol import (
     encode_global_event,
     encode_session_detail,
     encode_session_upsert,
-    encode_wifi_forget,
-    encode_wifi_provision,
+    encode_tts_data,
+    encode_tts_end,
+    encode_tts_start,
     global_event_char,
     parse_audio_notification,
-    parse_device_notification,
     status_char,
 )
 from openwaifud.models import AgentStatus, GlobalEventKind
@@ -201,84 +200,9 @@ class TestEncodeSessionDetail:
         assert parts[4] == ""
 
 
-class TestEncodeWifiProvision:
-    """W 命令（WiFi 配网）编码测试。"""
-
-    def test_basic(self):
-        line = encode_wifi_provision("MyWiFi", "secret123").decode("utf-8")
-        assert line == f"{CMD_WIFI}|MyWiFi|secret123"
-
-    def test_empty_password_allowed(self):
-        line = encode_wifi_provision("OpenNet", "").decode("utf-8")
-        assert line == f"{CMD_WIFI}|OpenNet|"
-
-    def test_special_chars_percent_encoded(self):
-        line = encode_wifi_provision("a|b", "p%s\r\n").decode("utf-8")
-        assert line == f"{CMD_WIFI}|a%7Cb|p%25s%0D%0A"
-
-    def test_unicode_preserved(self):
-        line = encode_wifi_provision("家里WiFi", "密码123").decode("utf-8")
-        assert line == f"{CMD_WIFI}|家里WiFi|密码123"
-
-    def test_empty_ssid_raises(self):
-        with pytest.raises(BLEProtocolError):
-            encode_wifi_provision("", "pass")
-
-    def test_too_long_raises(self):
-        with pytest.raises(BLEProtocolError):
-            encode_wifi_provision("s" * 32, "%" * 80)  # %25 膨胀后超预算
-
-
-class TestEncodeWifiForget:
-    """F 命令（忘记网络）编码测试。"""
-
-    def test_encodes_single_char(self):
-        assert encode_wifi_forget() == b"F"
-
-    def test_within_payload_limit(self):
-        assert len(encode_wifi_forget()) <= MAX_PAYLOAD
-
-
-class TestParseDeviceNotification:
-    """固件 Notify 通知解析测试。"""
-
-    def test_connected_with_ip(self):
-        result = parse_device_notification(b"W|G|192.168.1.5")
-        assert result == {"type": "wifi_status", "status": "connected", "detail": "192.168.1.5"}
-
-    def test_all_status_chars(self):
-        for char, name in (("I", "idle"), ("C", "connecting"), ("F", "failed"), ("D", "disconnected")):
-            result = parse_device_notification(f"W|{char}|".encode())
-            assert result is not None
-            assert result["status"] == name
-
-    def test_missing_detail_field(self):
-        result = parse_device_notification(b"W|C")
-        assert result is not None
-        assert result["status"] == "connecting"
-        assert result["detail"] == ""
-
-    def test_unknown_command_returns_none(self):
-        assert parse_device_notification(b"X|G|foo") is None
-
-    def test_unknown_status_returns_none(self):
-        assert parse_device_notification(b"W|Z|") is None
-
-    def test_invalid_utf8_returns_none(self):
-        assert parse_device_notification(b"W|G|\xff\xfe") is None
-
-
-class TestParseNotificationEdgeCases:
-    """通知解析的边界情况。"""
-
-    def test_empty_payload_returns_none(self):
-        assert parse_device_notification(b"") is None
-        assert parse_device_notification(b"   ") is None
-
-
 class TestParseAudioNotification:
     def test_non_audio_returns_none(self):
-        assert parse_audio_notification(b"W|G|192.168.1.5") is None
+        assert parse_audio_notification(b"S|s1|R|hello") is None
 
     def test_start_packet(self):
         payload = AUDIO_MAGIC + bytes([AUDIO_PACKET_START]) + (7).to_bytes(4, "little")
@@ -300,3 +224,26 @@ class TestParseAudioNotification:
         payload += (8000).to_bytes(2, "little") + bytes([8, 2]) + b"\x00\x00"
         with pytest.raises(BLEProtocolError):
             parse_audio_notification(payload)
+
+
+class TestEncodeTTS:
+    def test_start_packet(self):
+        payload = encode_tts_start(3, 64000)
+        assert payload[:4] == b"OWT\x01"
+        assert len(payload) == 16
+        assert int.from_bytes(payload[4:8], "little") == 3
+        assert int.from_bytes(payload[8:12], "little") == 64000
+        assert int.from_bytes(payload[12:14], "little") == 16000
+        assert payload[14:] == bytes([16, 1])
+
+    def test_data_packet(self):
+        payload = encode_tts_data(3, 2, b"\x01\x02")
+        assert payload == b"OWT\x02" + (3).to_bytes(4, "little") + (2).to_bytes(2, "little") + b"\x01\x02"
+
+    def test_data_rejects_oversize(self):
+        with pytest.raises(BLEProtocolError):
+            encode_tts_data(3, 0, b"x" * 231)
+
+    def test_end_packet(self):
+        payload = encode_tts_end(3, 64000)
+        assert payload == b"OWT\x03" + (3).to_bytes(4, "little") + (64000).to_bytes(4, "little")

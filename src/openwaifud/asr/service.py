@@ -98,8 +98,9 @@ class ASRService:
         async with self._model_lock:
             if self._model is not None:
                 return
-            self._model = await asyncio.to_thread(self._load_model)
-            await asyncio.to_thread(self._warm_up_sync)
+            model = await asyncio.to_thread(self._load_model)
+            await asyncio.to_thread(self._warm_up_sync, model)
+            self._model = model
 
     async def transcribe(self, recording: AudioRecording) -> str:
         """Transcribe a complete recording without blocking the asyncio loop."""
@@ -126,11 +127,11 @@ class ASRService:
         logger.info(f'Loading faster-whisper model "{self._model_name}" (CPU int8)')
         return WhisperModel(self._model_name, device="cpu", compute_type="int8")
 
-    def _warm_up_sync(self) -> None:
+    def _warm_up_sync(self, model: WhisperModel) -> None:
         import numpy as np
 
         logger.info(f'Warming up faster-whisper model "{self._model_name}"')
-        segments, _info = self._model.transcribe(
+        segments, _info = model.transcribe(
             np.zeros(16000, dtype=np.float32),
             language=self._language,
             beam_size=1,
@@ -143,8 +144,11 @@ class ASRService:
     def _transcribe_sync(self, pcm: bytes) -> str:
         import numpy as np
 
+        model = self._model
+        if model is None:
+            raise RuntimeError("faster-whisper model is not ready")
         audio = np.frombuffer(pcm, dtype="<i2").astype(np.float32) / 32768.0
-        segments, _info = self._model.transcribe(
+        segments, _info = model.transcribe(
             audio,
             language=self._language,
             task="transcribe",

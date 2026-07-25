@@ -9,7 +9,6 @@ from aiohttp import web
 from loguru import logger
 from pydantic import ValidationError
 
-from openwaifud.ble.protocol import BLEProtocolError
 from openwaifud.chat import ChatNotConfiguredError, ChatService, ChatUpstreamError
 from openwaifud.models import (
     ChatConfig,
@@ -18,7 +17,6 @@ from openwaifud.models import (
     DetailUpdate,
     GlobalEvent,
     StatusUpdate,
-    WifiProvisionRequest,
 )
 from openwaifud.state.manager import StateManager
 
@@ -34,8 +32,8 @@ def setup_routes(
 ) -> None:
     """Register all API routes.
 
-    :param ble_client: BLE 客户端（可选）。提供时启用设备列表与 WiFi 配网接口；
-        未提供时（如单元测试）相关接口返回 503。
+    :param ble_client: BLE 客户端（可选）。提供时启用设备列表接口；
+        未提供时（如单元测试）相关接口返回空列表。
     :param chat_service: 即时对话服务（可选）。未提供时对话相关接口返回 503。
     """
     handlers = APIHandlers(state_manager, ble_client, chat_service)
@@ -51,8 +49,6 @@ def setup_routes(
     app.router.add_get("/api/v1/state", handlers.handle_state)
     app.router.add_get("/api/v1/health", handlers.handle_health)
     app.router.add_get("/api/v1/devices", handlers.handle_devices)
-    app.router.add_post("/api/v1/wifi/provision", handlers.handle_wifi_provision)
-    app.router.add_post("/api/v1/wifi/forget", handlers.handle_wifi_forget)
 
 
 class APIHandlers:
@@ -69,74 +65,13 @@ class APIHandlers:
         self._chat_service = chat_service
 
     async def handle_index(self, request: web.Request) -> web.Response:
-        """GET / - 网页端设备管理页（蓝牙设备列表 + WiFi 配网）。"""
+        """GET / - 网页端设备管理页（蓝牙设备列表）。"""
         return aiohttp_jinja2.render_template("index.html", request, {})
 
     async def handle_devices(self, request: web.Request) -> web.Response:
-        """GET /api/v1/devices - 已知硬件设备列表（含 BLE/WiFi 状态）。"""
+        """GET /api/v1/devices - 已知硬件设备列表（含 BLE 连接状态）。"""
         devices = self._ble_client.get_devices() if self._ble_client is not None else []
         return web.json_response({"devices": devices})
-
-    async def handle_wifi_provision(self, request: web.Request) -> web.Response:
-        """POST /api/v1/wifi/provision - 向已连接设备下发 WiFi 凭据。"""
-        try:
-            data = await request.json()
-        except Exception:
-            return web.json_response(
-                {"error": "Invalid JSON body"},
-                status=400,
-            )
-
-        try:
-            req = WifiProvisionRequest(**data)
-        except ValidationError as e:
-            return web.json_response(
-                {"error": "Validation failed", "details": e.errors()},
-                status=422,
-            )
-
-        if self._ble_client is None or not self._ble_client.connected:
-            return web.json_response(
-                {"error": "设备未连接，请先等待蓝牙连接成功"},
-                status=503,
-            )
-
-        try:
-            ok = await self._ble_client.send_wifi_provision(req.ssid, req.password)
-        except BLEProtocolError as e:
-            return web.json_response(
-                {"error": str(e)},
-                status=422,
-            )
-        if not ok:
-            return web.json_response(
-                {"error": "BLE 写入失败，请重试"},
-                status=502,
-            )
-
-        logger.info(f'WiFi provision accepted: ssid="{req.ssid}"')
-        return web.json_response(
-            {"success": True, "ssid": req.ssid},
-            status=200,
-        )
-
-    async def handle_wifi_forget(self, request: web.Request) -> web.Response:
-        """POST /api/v1/wifi/forget - 让设备断开 WiFi 并清除已保存的凭据。"""
-        if self._ble_client is None or not self._ble_client.connected:
-            return web.json_response(
-                {"error": "设备未连接，请先等待蓝牙连接成功"},
-                status=503,
-            )
-
-        ok = await self._ble_client.send_wifi_forget()
-        if not ok:
-            return web.json_response(
-                {"error": "BLE 写入失败，请重试"},
-                status=502,
-            )
-
-        logger.info("WiFi forget accepted")
-        return web.json_response({"success": True}, status=200)
 
     async def handle_status(self, request: web.Request) -> web.Response:
         """POST /api/v1/status - Receive agent status update."""

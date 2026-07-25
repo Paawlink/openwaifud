@@ -144,17 +144,6 @@ class ChatRequest(BaseModel):
     message: str = Field(..., min_length=1, max_length=4000, description="用户消息")
 
 
-class WifiProvisionRequest(BaseModel):
-    """WiFi 配网请求（来自网页端配网界面）。
-
-    守护进程收到后经 BLE ``W`` 命令下发到硬件设备，由设备自行连接 WiFi。
-    password 允许为空（开放网络）。
-    """
-
-    ssid: str = Field(..., min_length=1, max_length=32, description="WiFi SSID（2.4GHz）")
-    password: str = Field(default="", max_length=64, description="WiFi 密码，空表示开放网络")
-
-
 class DaemonState(BaseModel):
     """Current daemon state snapshot."""
 
