@@ -9,7 +9,6 @@ from loguru import logger
 from openwaifud.api.server import HTTPServer
 from openwaifud.ble.client import BLEClient
 from openwaifud.chat import ChatService
-from openwaifud.chat.skills import CreateOpenCodeSessionSkill
 from openwaifud.config import Config
 from openwaifud.state.manager import StateManager
 
@@ -25,12 +24,9 @@ class OpenWaifuDaemon:
             sweep_interval=config.session_sweep_interval,
         )
         self._ble_client = BLEClient(config)
-        # 对话服务接入状态快照与实例列表，并挂载“创建 OpenCode 会话”技能，
-        # 使「涂鸦」能在语音对话中播报 Agent 状态，并在用户确认实例后新建会话
+        # 对话服务接入状态快照，使「涂鸦」能在语音对话中播报 Agent 工作状态
         self._chat_service = ChatService(
             state_provider=self._state_manager.get_current_state,
-            instances_provider=self._state_manager.list_live_instances,
-            skills=[CreateOpenCodeSessionSkill(self._state_manager)],
         )
         self._http_server = HTTPServer(
             state_manager=self._state_manager,

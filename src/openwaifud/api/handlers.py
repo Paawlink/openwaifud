@@ -45,7 +45,6 @@ def setup_routes(
     app.router.add_post("/api/v1/event", handlers.handle_event)
     app.router.add_post("/api/v1/session/detail", handlers.handle_detail_post)
     app.router.add_get("/api/v1/session/{session_id}/detail", handlers.handle_detail_get)
-    app.router.add_get("/api/v1/session/create/pending", handlers.handle_session_create_pending)
     app.router.add_get("/api/v1/chat/config", handlers.handle_chat_config_get)
     app.router.add_put("/api/v1/chat/config", handlers.handle_chat_config_put)
     app.router.add_post("/api/v1/chat", handlers.handle_chat)
@@ -259,26 +258,6 @@ class APIHandlers:
                 status=404,
             )
         return web.json_response(detail.model_dump(mode="json"))
-
-    async def handle_session_create_pending(self, request: web.Request) -> web.Response:
-        """GET /api/v1/session/create/pending - 领取定向给本实例的“创建会话”指令。
-
-        指令由「涂鸦」对话技能在用户确认目标实例后登记。查询参数
-        ``instance_id``（必需）与 ``directory``（可选）兼作插件实例心跳，
-        用于维护存活实例注册表。消费式读取（每条指令只返回一次），
-        领取后由插件在 OpenCode 中实际创建并切到前台。
-        """
-        instance_id = request.query.get("instance_id", "").strip()
-        if not instance_id:
-            return web.json_response(
-                {"error": "Missing instance_id", "requests": []},
-                status=400,
-            )
-        directory = request.query.get("directory", "").strip()
-        requests = self._state_manager.claim_pending_session_creates(instance_id, directory)
-        return web.json_response(
-            {"requests": [req.model_dump(mode="json") for req in requests]},
-        )
 
     async def handle_chat_config_get(self, request: web.Request) -> web.Response:
         """GET /api/v1/chat/config - 读取对话模型配置（api_key 不回显）。"""

@@ -5,16 +5,13 @@ OpenAI 兼容 API，回复再经 TTS 播报。因此 prompt 强调口语化、�
 Markdown 等任何排版符号。
 
 每次对话时把 daemon 的实时状态快照（:class:`~openwaifud.models.DaemonState`）
-与存活的 OpenCode 实例列表渲染成自然语言注入 prompt，让涂鸦既能回答
-"你在忙什么""编码任务跑多久了"这类问题，也能在用户想新建会话时
-引导其确认目标实例并调用创建会话技能。
+渲染成自然语言注入 prompt，让涂鸦能回答"你在忙什么""编码任务跑多久了"
+这类问题。
 """
 
 from __future__ import annotations
 
-from pathlib import PurePath
-
-from openwaifud.models import AgentStatus, DaemonState, PluginInstanceInfo, SessionInfo
+from openwaifud.models import AgentStatus, DaemonState, SessionInfo
 
 # 状态枚举 -> 口语化中文描述
 _STATUS_LABELS: dict[AgentStatus, str] = {
@@ -37,17 +34,7 @@ _PERSONA = """\
 2. 用户询问工作状态（比如"现在在忙什么""任务跑完了吗"）时，依据下方的实时状态\
 概览如实回答；概览里没有的信息不要编造。
 3. 会话出错时先安抚再简述错误；一切空闲时可以轻松地陪主人闲聊。
-4. 保持亲切、活泼、简洁，像一只懂技术的小桌宠。
-
-新建会话技能（create_opencode_session）：
-1. 当用户表达出想新开一个聊天/会话/任务、想让编程助手帮忙干活的意愿时，\
-使用该技能在 OpenCode 中创建新会话。
-2. 目标实例必须由用户确认，不要自作主张选某一个：下方列出了存活的 OpenCode 实例，\
-有多个时先用项目名称口头列举并询问用户要用哪个，得到明确答复后再调用技能；\
-只有一个实例时可直接使用，但要在回复里说明在哪个项目创建。
-3. 调用时 instance_id 必须取自实例列表，不得编造；若用户顺带说了想让助手做的事，\
-把它作为 prompt 参数一并传入。
-4. 实例列表为空时不要调用技能，告诉用户先在电脑上打开 OpenCode。"""
+4. 保持亲切、活泼、简洁，像一只懂技术的小桌宠。"""
 
 
 def _format_elapsed(seconds: float) -> str:
@@ -93,38 +80,13 @@ def _render_state(state: DaemonState) -> str:
     return "\n".join(lines)
 
 
-def _render_instances(instances: list[PluginInstanceInfo]) -> str:
-    """把存活实例列表渲染成注入 prompt 的自然语言清单。"""
-    if not instances:
-        return "当前没有存活的 OpenCode 实例，无法创建新会话。"
-    lines = [f"当前存活的 OpenCode 实例（共 {len(instances)} 个）："]
-    for i, inst in enumerate(instances, start=1):
-        project = PurePath(inst.directory).name if inst.directory else "未知项目"
-        lines.append(
-            f"{i}. 项目「{project}」，目录 {inst.directory or '未上报'}，"
-            f"instance_id：{inst.instance_id}"
-        )
-    return "\n".join(lines)
-
-
-def build_system_prompt(
-    state: DaemonState | None = None,
-    instances: list[PluginInstanceInfo] | None = None,
-) -> str:
-    """构建注入实时状态与实例列表的 system prompt。
+def build_system_prompt(state: DaemonState | None = None) -> str:
+    """构建注入实时状态的 system prompt。
 
     :param state: daemon 当前状态快照；为 None 时（如状态源不可用）
         仅返回人设部分，并提示涂鸦状态暂不可知。
-    :param instances: 存活的 OpenCode 实例列表，供新建会话技能确认目标；
-        为 None 时视为暂无实例。
     """
     overview = (
         "暂时读取不到工作状态，被问到时请如实说明。" if state is None else _render_state(state)
     )
-    return (
-        _PERSONA
-        + "\n\n【实时状态概览】\n"
-        + overview
-        + "\n\n【OpenCode 实例列表】\n"
-        + _render_instances(instances or [])
-    )
+    return _PERSONA + "\n\n【实时状态概览】\n" + overview
