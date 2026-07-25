@@ -29,12 +29,40 @@
 | 数据模型 | pydantic v2 |
 | 代码规范 | Ruff |
 
-## 快速开始
+## 系统组成与部署顺序
+
+完整的 OpenWaifu 系统由三部分组成，建议按以下顺序部署：
+
+| 顺序 | 组件 | 位置 | 作用 |
+|------|------|------|------|
+| 1 | 固件 `openwaifu` | TuyaOpen 仓库 `apps/openwaifu` | T5AI 开发板：BLE 从机 + LVGL 会话看板 + 按键语音 |
+| 2 | 守护进程 `openwaifud` | 本仓库 | 电脑端：BLE 主机 + HTTP API + 本地 ASR/TTS |
+| 3 | Agent 桥接 `oh-my-openwaifu` | waifu-oc 仓库 | OpenCode 插件 + Qoder / Claude Code / Codex hook 脚本 |
+
+固件构建烧录与 Agent 桥接的部署步骤见各自仓库的 README，本文档只覆盖守护进程。
+
+## 部署
+
+### 环境要求
+
+- macOS / Linux（BLE 基于 bleak，macOS 走 CoreBluetooth）
+- Python 3.11+
+- [uv](https://docs.astral.sh/uv/) 包管理器
+- 支持 BLE 的蓝牙硬件
+
+### 安装
 
 ```bash
-# 安装依赖
+git clone <本仓库地址>
+cd openwaifud
 uv sync
+```
 
+> 依赖中的 MeloTTS 直接从 GitHub 源码安装，首次 `uv sync` 需要能访问 github.com，耗时较长属正常现象。
+
+### 运行
+
+```bash
 # 运行（仅 HTTP API）
 uv run openwaifud
 
@@ -52,6 +80,39 @@ uv run openwaifud --help
 ```
 
 支持环境变量配置：`OPENWAIFUD_HTTP_HOST`、`OPENWAIFUD_HTTP_PORT`、`OPENWAIFUD_BLE_ADDRESS`、`OPENWAIFUD_BLE_DEVICE_NAME`、`OPENWAIFUD_LOG_LEVEL`、`OPENWAIFUD_ASR_MODEL`、`OPENWAIFUD_ASR_LANGUAGE`、`OPENWAIFUD_TTS_LANGUAGE`、`OPENWAIFUD_TTS_SPEAKER`、`OPENWAIFUD_TTS_DEVICE`、`OPENWAIFUD_TTS_SPEED`。CLI 参数优先级高于环境变量。
+
+### 首次启动注意
+
+首次启动会自动下载并预热两个本地模型（需要网络，之后走本地缓存）：
+
+- **ASR**：faster-whisper `medium`（约 1.5 GB；可用 `OPENWAIFUD_ASR_MODEL=small` 换更小更快的模型）
+- **TTS**：MeloTTS `ZH` 模型（下载到 Hugging Face 缓存目录）
+
+macOS 首次运行会弹出蓝牙权限请求，请点击「允许」；若从终端运行，还需在「系统设置 → 隐私与安全性 → 蓝牙」中为终端应用授权，否则 BLE 扫描会静默失败。
+
+### 验证
+
+```bash
+# 1. 健康检查（含 BLE 连接状态）
+curl http://127.0.0.1:8765/api/v1/health
+
+# 2. 浏览器打开 Web 控制台（实时查看会话、设备与聊天配置）
+open http://127.0.0.1:8765/
+
+# 3. 模拟一个 Agent 会话（另开终端），观察控制台与设备屏幕
+python3 tools/mock_agent.py
+```
+
+设备已烧录固件并上电时，守护进程会自动扫描并连接名为 `OpenWaifu` 的设备：`health` 返回 `"ble_connected": true`、设备屏幕图例从「请连接蓝牙」切换为状态说明，即部署成功。
+
+### 常驻运行（可选）
+
+```bash
+# 简单后台常驻
+nohup uv run openwaifud > /tmp/openwaifud.log 2>&1 &
+```
+
+如需开机自启，macOS 可用 launchd（`~/Library/LaunchAgents` 下建 plist，`ProgramArguments` 指向 `uv run openwaifud`，注意 launchd 环境同样需要蓝牙权限），Linux 可用 systemd user unit。
 
 ## HTTP API 文档
 
@@ -104,7 +165,7 @@ uv run openwaifud --help
 }
 ```
 
-`event` 可选值：`error`、`cancel`。`session_id` 与 `message` 均为可选。非法 JSON 返回 400，字段校验失败返回 422。
+`event` 可选值：`error`、`cancel`、`done`。`session_id` 与 `message` 均为可选。非法 JSON 返回 400，字段校验失败返回 422。
 
 ### POST /api/v1/context
 
@@ -222,9 +283,9 @@ python3 tools/mock_agent.py --status error --task "加载用户资料"
 
 > 未配置 `--ble-address` 时，守护进程会持续扫描设备名 `OpenWaifu`（可用 `OPENWAIFUD_BLE_DEVICE_NAME` 覆盖），新设备出现后会立即尝试连接。扫描异常退出时会自动重启。每台设备拥有独立的写队列、重连任务和音频流；Agent 状态广播到全部已连接设备，语音回复只返回发起录音的设备。指定 `--ble-address` 时仍只连接该设备。
 
-### 唤醒录音与 ASR
+### 按键录音与 ASR
 
-固件识别到“你好涂鸦”后，通过 Notify 特征发送二进制 PCM 音频。音频包使用
+单击设备按键后，固件固定录制 5 秒音频，通过 Notify 特征发送二进制 PCM 音频。音频包使用
 `OWA` 魔数，通过开始帧、带序号的数据帧和结束帧组成一次录音。OpenWaifuD 会校验
 流 ID、数据帧序号和最终 PCM 长度；存在丢包或长度不一致时丢弃该次录音，不送入 ASR。
 
@@ -282,10 +343,11 @@ OPENWAIFUD_TTS_LANGUAGE=ZH OPENWAIFUD_TTS_SPEAKER=ZH OPENWAIFUD_TTS_SPEED=1.0 uv
 
 `<ev>` 为单字符事件码，`<detail>` 为可选详情文本（同样按字节预算安全截断）：
 
-| GlobalEventKind | 事件码 | 屏幕左下角 |
+| GlobalEventKind | 事件码 | 设备端效果 |
 |-----------------|--------|-----------|
-| `error` | `E` | ⚠ 出错（数秒后回落） |
-| `cancel` | `X` | ✋ 已取消（数秒后回落） |
+| `error` | `E` | 桌宠切换 Error 形象（数秒后回落） |
+| `cancel` | `X` | 仅记录，不切换形象（Confused 专用于语音录音阶段） |
+| `done` | `D` | 桌宠切换 Celebration 形象（数秒后回落） |
 
 > 全局事件为瞬时态，不参与快照对账，也不在重连后重放——重连后左下角自然回落中性态即可。
 
@@ -362,5 +424,5 @@ uv run ruff format src/
 
 - **优雅降级** — 未配置 BLE 地址或设备离线时，HTTP API 正常工作不受影响
 - **异步队列解耦** — HTTP 处理器通过异步队列投递消息，BLE 写入由独立消费协程处理，互不阻塞
-- **指数退避重连** — BLE 断线后自动尝试重连，避免频繁连接风暴
+- **固定间隔重连** — BLE 断线后按固定间隔自动重连（扫描超时与重连间隔匹配），重试节奏可预期
 - **信号处理与优雅关闭** — 监听 SIGINT/SIGTERM，按序停止消费者、断开 BLE、关闭 HTTP 服务器
