@@ -278,6 +278,11 @@ class StateManager:
             updated_at=rt.wall_updated_at,
         )
 
+    def list_session_details(self) -> list[SessionDetail]:
+        """返回所有会话的完整详情快照（供 chat prompt 注入等只读场景）。"""
+        details = (self.get_session_detail(sid) for sid in list(self._sessions))
+        return [d for d in details if d is not None]
+
     # ------------------------------------------------------------------
     # BLE 回调 / 生命周期
     # ------------------------------------------------------------------
@@ -286,10 +291,11 @@ class StateManager:
         """Register BLE send callback. Called by daemon during initialization."""
         self._ble_callback = callback
 
-    async def resync_ble(self) -> None:
+    async def resync_ble(self, device_id: str | None = None) -> None:
         """BLE（重）连接后立即下发一帧完整快照，避免等待下一个同步周期。"""
-        await self._push_snapshot()
-        logger.info(f"Resync BLE with {len(self._sessions)} active session(s)")
+        await self._push_snapshot(device_id)
+        target = f" device {device_id}" if device_id else " BLE devices"
+        logger.info(f"Resync{target} with {len(self._sessions)} active session(s)")
 
     async def start_consumer(self) -> None:
         """启动后台消费者、清扫器与全量同步任务。"""
@@ -311,29 +317,55 @@ class StateManager:
     # 队列 / 清扫
     # ------------------------------------------------------------------
 
-    async def _enqueue_upsert(self, rt: _SessionRuntime, now: float) -> None:
-        message = {
-            "type": "session_upsert",
-            "data": {
-                "session_id": rt.session_id,
-                "plugin_type": rt.plugin_type,
-                "status": rt.status,
-                "current_task": rt.current_task,
-                "error_message": rt.error_message,
-                "elapsed_seconds": int(rt.elapsed(now)),
+    async def _enqueue_upsert(self, rt: _SessionRuntime, now: float, device_id: str | None = None) -> None:
+        message = self._target_message(
+            {
+                "type": "session_upsert",
+                "data": {
+                    "session_id": rt.session_id,
+                    "plugin_type": rt.plugin_type,
+                    "status": rt.status,
+                    "current_task": rt.current_task,
+                    "error_message": rt.error_message,
+                    "elapsed_seconds": int(rt.elapsed(now)),
+                },
             },
-        }
+            device_id,
+        )
         await self._enqueue(message)
 
     async def _enqueue(self, message: dict[str, Any]) -> None:
-        """Enqueue message, dropping oldest if full."""
+        """Enqueue a message, preserving priority messages when the queue is full."""
         if self._queue.full():
+            items: list[dict[str, Any]] = []
             try:
-                self._queue.get_nowait()  # Drop oldest
-                logger.warning("State queue full, dropped oldest message")
+                while True:
+                    items.append(self._queue.get_nowait())
+                    self._queue.task_done()
             except asyncio.QueueEmpty:
                 pass
+
+            drop_index = next((i for i, item in enumerate(items) if not self._is_priority_message(item)), None)
+            if drop_index is None and not self._is_priority_message(message):
+                for item in items:
+                    await self._queue.put(item)
+                logger.warning(f"State queue full, dropped incoming message ({message.get('type', 'unknown')})")
+                return
+
+            dropped = items.pop(drop_index if drop_index is not None else 0)
+            for item in items:
+                await self._queue.put(item)
+            logger.warning(
+                f"State queue full, dropped {'priority' if self._is_priority_message(dropped) else 'oldest'} "
+                f"message ({dropped.get('type', 'unknown')})"
+            )
         await self._queue.put(message)
+
+    @staticmethod
+    def _is_priority_message(message: dict[str, Any]) -> bool:
+        """Recognize TTS messages if they are routed through the state queue."""
+        message_type = str(message.get("type", "")).lower()
+        return bool(message.get("priority") == "high" or message_type.startswith("tts"))
 
     async def _consume_loop(self) -> None:
         """Background consumer: dequeue and send via BLE callback."""
@@ -395,7 +427,7 @@ class StateManager:
             logger.debug("Full-sync loop cancelled")
             raise
 
-    async def _push_snapshot(self) -> None:
+    async def _push_snapshot(self, device_id: str | None = None) -> None:
         """下发一帧完整快照（``B`` -> 全量 ``S`` + ``D`` -> ``E``）。
 
         对每个活跃会话先发送 ``S``（会话概览），再发送若干条 ``D``（详情数据：
@@ -403,13 +435,19 @@ class StateManager:
         未连接时消费者会在发送环节自动丢弃，故此处不做连接判断，保持逻辑简单。
         """
         now = time.monotonic()
-        await self._enqueue({"type": "sync_begin"})
+        await self._enqueue(self._target_message({"type": "sync_begin"}, device_id))
         for rt in self._sessions.values():
-            await self._enqueue_upsert(rt, now)
-            await self._enqueue_detail(rt)
-        await self._enqueue({"type": "sync_end"})
+            await self._enqueue_upsert(rt, now, device_id)
+            await self._enqueue_detail(rt, device_id)
+        await self._enqueue(self._target_message({"type": "sync_end"}, device_id))
 
-    async def _enqueue_detail(self, rt: _SessionRuntime) -> None:
+    @staticmethod
+    def _target_message(message: dict[str, Any], device_id: str | None) -> dict[str, Any]:
+        if device_id is not None:
+            message["target_device_id"] = device_id
+        return message
+
+    async def _enqueue_detail(self, rt: _SessionRuntime, device_id: str | None = None) -> None:
         """为单个会话下发详情数据（多条 ``D`` 命令）。
 
         按顺序发送：错误信息 -> 元数据条目 -> 聊天消息。每种 kind 独立
@@ -421,37 +459,52 @@ class StateManager:
         """
         sid = rt.session_id
         # 错误信息（kind=0，seq=0）
-        await self._enqueue({
-            "type": "session_detail",
-            "data": {
-                "session_id": sid,
-                "kind": "0",
-                "seq": 0,
-                "text": rt.error_message or "",
-            },
-        })
+        await self._enqueue(
+            self._target_message(
+                {
+                    "type": "session_detail",
+                    "data": {
+                        "session_id": sid,
+                        "kind": "0",
+                        "seq": 0,
+                        "text": rt.error_message or "",
+                    },
+                },
+                device_id,
+            )
+        )
         # 元数据条目（kind=1，seq 从 0 开始，最多 8 条）
         for i, (key, value) in enumerate(list(rt.metadata.items())[:8]):
             text = f"{key}: {value}"
-            await self._enqueue({
-                "type": "session_detail",
-                "data": {
-                    "session_id": sid,
-                    "kind": "1",
-                    "seq": i,
-                    "text": text,
-                },
-            })
+            await self._enqueue(
+                self._target_message(
+                    {
+                        "type": "session_detail",
+                        "data": {
+                            "session_id": sid,
+                            "kind": "1",
+                            "seq": i,
+                            "text": text,
+                        },
+                    },
+                    device_id,
+                )
+            )
         # 聊天消息（kind=2，seq 从 0 开始，最多 12 条，取最近的）
         recent_chat = list(rt.chat_context[-12:])
         for i, msg in enumerate(recent_chat):
             text = f"{msg.role}: {msg.content}"
-            await self._enqueue({
-                "type": "session_detail",
-                "data": {
-                    "session_id": sid,
-                    "kind": "2",
-                    "seq": i,
-                    "text": text,
-                },
-            })
+            await self._enqueue(
+                self._target_message(
+                    {
+                        "type": "session_detail",
+                        "data": {
+                            "session_id": sid,
+                            "kind": "2",
+                            "seq": i,
+                            "text": text,
+                        },
+                    },
+                    device_id,
+                )
+            )

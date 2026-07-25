@@ -26,9 +26,15 @@
 其中 ``<st>`` 为单字符状态码（见 :data:`STATUS_CHARS`），``<elapsed>`` 为该会话
 已运行的整数秒数（固件收到后在本地按秒继续跳动）。字段以 ``|`` 分隔，因此
 ``sid`` / ``task`` / ``detail`` 中的 ``|``、换行等字符会在编码前被替换为空格。
+
+此外固件通过 Notify 特征（:data:`NOTIFY_CHAR_UUID`）向守护进程回传带 ``OWA``
+魔数的二进制音频包（见 :func:`parse_audio_notification`）。
 """
 
 from __future__ import annotations
+
+import struct
+from dataclasses import dataclass
 
 from openwaifud.models import AgentStatus, GlobalEventKind
 
@@ -39,9 +45,71 @@ from openwaifud.models import AgentStatus, GlobalEventKind
 DEVICE_NAME = "OpenWaifu"
 SERVICE_UUID = "0000fd50-0000-1000-0880-00805f9b34fb"
 WRITE_CHAR_UUID = "00000001-0000-1001-8001-00805f9b07d0"
+NOTIFY_CHAR_UUID = "00000002-0000-1001-8001-00805f9b07d0"
 
 # 单条命令 UTF-8 编码后的最大字节数（与固件 OPENWAIFU_BLE_MAX_MSG_LEN 对齐）
 MAX_PAYLOAD: int = 240
+
+# 固件 Notify 回传的二进制音频协议
+AUDIO_MAGIC = b"OWA"
+AUDIO_PACKET_START = 1
+AUDIO_PACKET_DATA = 2
+AUDIO_PACKET_END = 3
+TTS_MAGIC = b"OWT"
+TTS_PACKET_START = 1
+TTS_PACKET_DATA = 2
+TTS_PACKET_END = 3
+TTS_PCM_CHUNK_SIZE = MAX_PAYLOAD - 10
+
+
+@dataclass(frozen=True)
+class AudioStartPacket:
+    stream_id: int
+    sample_rate: int
+    sample_bits: int
+    channels: int
+
+
+@dataclass(frozen=True)
+class AudioDataPacket:
+    stream_id: int
+    sequence: int
+    pcm: bytes
+
+
+@dataclass(frozen=True)
+class AudioEndPacket:
+    stream_id: int
+    pcm_bytes: int
+    dropped_bytes: int
+
+
+AudioPacket = AudioStartPacket | AudioDataPacket | AudioEndPacket
+
+
+def encode_tts_start(
+    stream_id: int,
+    pcm_bytes: int,
+    sample_rate: int = 16000,
+    sample_bits: int = 16,
+    channels: int = 1,
+) -> bytes:
+    """Encode the start of a daemon-to-device TTS PCM stream."""
+    return TTS_MAGIC + bytes([TTS_PACKET_START]) + struct.pack(
+        "<IIHBB", stream_id, pcm_bytes, sample_rate, sample_bits, channels
+    )
+
+
+def encode_tts_data(stream_id: int, sequence: int, pcm: bytes) -> bytes:
+    """Encode one ordered TTS PCM chunk."""
+    if not pcm or len(pcm) > TTS_PCM_CHUNK_SIZE:
+        raise BLEProtocolError(f"Invalid TTS PCM chunk length: {len(pcm)}")
+    return TTS_MAGIC + bytes([TTS_PACKET_DATA]) + struct.pack("<IH", stream_id, sequence) + pcm
+
+
+def encode_tts_end(stream_id: int, pcm_bytes: int) -> bytes:
+    """Encode the end of a daemon-to-device TTS PCM stream."""
+    return TTS_MAGIC + bytes([TTS_PACKET_END]) + struct.pack("<II", stream_id, pcm_bytes)
 
 # 字段分隔符与命令前缀
 FIELD_SEP = "|"
@@ -124,6 +192,43 @@ def _encode_line(text: str) -> bytes:
 # ---------------------------------------------------------------------------
 # 命令编码
 # ---------------------------------------------------------------------------
+
+
+def parse_audio_notification(payload: bytes) -> AudioPacket | None:
+    """解析固件 Notify 回传的 ``OWA`` 二进制音频包。
+
+    非音频通知返回 ``None``；带 ``OWA`` 魔数但结构非法时抛出
+    :class:`BLEProtocolError`，以便调用方区分普通文本通知和损坏的音频帧。
+    """
+    if not payload.startswith(AUDIO_MAGIC):
+        return None
+    if len(payload) < 4:
+        raise BLEProtocolError("Truncated audio packet header")
+
+    packet_type = payload[3]
+    if packet_type == AUDIO_PACKET_START:
+        if len(payload) != 14:
+            raise BLEProtocolError(f"Invalid audio start packet length: {len(payload)}")
+        stream_id, sample_rate, sample_bits, channels, _reserved = struct.unpack_from("<IHBBH", payload, 4)
+        if sample_rate <= 0 or sample_bits != 16 or channels != 1:
+            raise BLEProtocolError(
+                f"Unsupported audio format: {sample_rate} Hz, {sample_bits}-bit, {channels} channel(s)"
+            )
+        return AudioStartPacket(stream_id, sample_rate, sample_bits, channels)
+
+    if packet_type == AUDIO_PACKET_DATA:
+        if len(payload) <= 10:
+            raise BLEProtocolError(f"Invalid audio data packet length: {len(payload)}")
+        stream_id, sequence = struct.unpack_from("<IH", payload, 4)
+        return AudioDataPacket(stream_id, sequence, payload[10:])
+
+    if packet_type == AUDIO_PACKET_END:
+        if len(payload) != 16:
+            raise BLEProtocolError(f"Invalid audio end packet length: {len(payload)}")
+        stream_id, pcm_bytes, dropped_bytes = struct.unpack_from("<III", payload, 4)
+        return AudioEndPacket(stream_id, pcm_bytes, dropped_bytes)
+
+    raise BLEProtocolError(f"Unknown audio packet type: {packet_type}")
 
 
 def encode_sync_begin() -> bytes:

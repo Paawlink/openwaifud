@@ -1,6 +1,12 @@
 """Tests for openwaifud.ble.protocol (session command-line protocol)."""
 
+import pytest
+
 from openwaifud.ble.protocol import (
+    AUDIO_MAGIC,
+    AUDIO_PACKET_DATA,
+    AUDIO_PACKET_END,
+    AUDIO_PACKET_START,
     CMD_DETAIL,
     CMD_GLOBAL,
     CMD_UPSERT,
@@ -10,13 +16,22 @@ from openwaifud.ble.protocol import (
     DEVICE_NAME,
     GLOBAL_EVENT_CHARS,
     MAX_PAYLOAD,
+    NOTIFY_CHAR_UUID,
     SERVICE_UUID,
     STATUS_CHARS,
     WRITE_CHAR_UUID,
+    AudioDataPacket,
+    AudioEndPacket,
+    AudioStartPacket,
+    BLEProtocolError,
     encode_global_event,
     encode_session_detail,
     encode_session_upsert,
+    encode_tts_data,
+    encode_tts_end,
+    encode_tts_start,
     global_event_char,
+    parse_audio_notification,
     status_char,
 )
 from openwaifud.models import AgentStatus, GlobalEventKind
@@ -33,6 +48,9 @@ class TestGattIdentifiers:
 
     def test_write_char_uuid(self):
         assert WRITE_CHAR_UUID == "00000001-0000-1001-8001-00805f9b07d0"
+
+    def test_notify_char_uuid(self):
+        assert NOTIFY_CHAR_UUID == "00000002-0000-1001-8001-00805f9b07d0"
 
 
 class TestStatusChars:
@@ -180,3 +198,52 @@ class TestEncodeSessionDetail:
         line = encode_session_detail("s1", DETAIL_ERROR, 0, "").decode("utf-8")
         parts = line.split("|", 4)
         assert parts[4] == ""
+
+
+class TestParseAudioNotification:
+    def test_non_audio_returns_none(self):
+        assert parse_audio_notification(b"S|s1|R|hello") is None
+
+    def test_start_packet(self):
+        payload = AUDIO_MAGIC + bytes([AUDIO_PACKET_START]) + (7).to_bytes(4, "little")
+        payload += (16000).to_bytes(2, "little") + bytes([16, 1]) + b"\x00\x00"
+        assert parse_audio_notification(payload) == AudioStartPacket(7, 16000, 16, 1)
+
+    def test_data_packet(self):
+        payload = AUDIO_MAGIC + bytes([AUDIO_PACKET_DATA]) + (7).to_bytes(4, "little")
+        payload += (3).to_bytes(2, "little") + b"\x01\x02"
+        assert parse_audio_notification(payload) == AudioDataPacket(7, 3, b"\x01\x02")
+
+    def test_end_packet(self):
+        payload = AUDIO_MAGIC + bytes([AUDIO_PACKET_END]) + (7).to_bytes(4, "little")
+        payload += (100).to_bytes(4, "little") + (2).to_bytes(4, "little")
+        assert parse_audio_notification(payload) == AudioEndPacket(7, 100, 2)
+
+    def test_rejects_unsupported_format(self):
+        payload = AUDIO_MAGIC + bytes([AUDIO_PACKET_START]) + (7).to_bytes(4, "little")
+        payload += (8000).to_bytes(2, "little") + bytes([8, 2]) + b"\x00\x00"
+        with pytest.raises(BLEProtocolError):
+            parse_audio_notification(payload)
+
+
+class TestEncodeTTS:
+    def test_start_packet(self):
+        payload = encode_tts_start(3, 64000)
+        assert payload[:4] == b"OWT\x01"
+        assert len(payload) == 16
+        assert int.from_bytes(payload[4:8], "little") == 3
+        assert int.from_bytes(payload[8:12], "little") == 64000
+        assert int.from_bytes(payload[12:14], "little") == 16000
+        assert payload[14:] == bytes([16, 1])
+
+    def test_data_packet(self):
+        payload = encode_tts_data(3, 2, b"\x01\x02")
+        assert payload == b"OWT\x02" + (3).to_bytes(4, "little") + (2).to_bytes(2, "little") + b"\x01\x02"
+
+    def test_data_rejects_oversize(self):
+        with pytest.raises(BLEProtocolError):
+            encode_tts_data(3, 0, b"x" * 231)
+
+    def test_end_packet(self):
+        payload = encode_tts_end(3, 64000)
+        assert payload == b"OWT\x03" + (3).to_bytes(4, "little") + (64000).to_bytes(4, "little")

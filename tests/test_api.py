@@ -224,3 +224,15 @@ class TestHealthEndpoint:
         assert data["status"] == "ok"
         assert "ble_connected" in data
         assert "uptime_seconds" in data
+
+
+class TestDevicesEndpoint:
+    """Tests for GET /api/v1/devices."""
+
+    async def test_no_ble_client_returns_empty_list(self, client):
+        """未提供 ble_client 时设备列表为空。"""
+        cli = await client
+        resp = await cli.get("/api/v1/devices")
+        assert resp.status == 200
+        data = await resp.json()
+        assert data["devices"] == []

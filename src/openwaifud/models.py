@@ -125,6 +125,25 @@ class DetailUpdate(BaseModel):
     timestamp: datetime = Field(default_factory=lambda: datetime.now(UTC))
 
 
+
+class ChatConfig(BaseModel):
+    """即时对话接口的模型配置（OpenAI 兼容 API）。
+
+    由网页端配置并持久化到本地文件；api_key 只写不读（GET 仅返回
+    是否已配置）。base_url 为兼容端点前缀，如 ``https://api.openai.com/v1``。
+    """
+
+    base_url: str = Field(default="", max_length=200, description="OpenAI 兼容 API 前缀")
+    api_key: str = Field(default="", max_length=200, description="API Key（只写）")
+    model: str = Field(default="", max_length=100, description="模型名，如 gpt-4o-mini")
+
+
+class ChatRequest(BaseModel):
+    """即时对话请求：单次提问，同步返回回复。"""
+
+    message: str = Field(..., min_length=1, max_length=4000, description="用户消息")
+
+
 class DaemonState(BaseModel):
     """Current daemon state snapshot."""
 

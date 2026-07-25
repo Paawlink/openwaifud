@@ -23,6 +23,8 @@
 | 包管理 | UV |
 | HTTP 服务 | aiohttp |
 | BLE 通信 | bleak |
+| 本地语音识别 | faster-whisper（CPU int8） |
+| 本地语音合成 | kokoro-onnx 中文模型 |
 | 日志 | loguru |
 | 数据模型 | pydantic v2 |
 | 代码规范 | Ruff |
@@ -39,7 +41,7 @@ uv run openwaifud
 # 运行（带 BLE 设备，指定地址）
 uv run openwaifud --ble-address AA:BB:CC:DD:EE:FF
 
-# 运行（不指定地址时，自动按设备名 OpenWaifu 扫描连接）
+# 运行（不指定地址时，自动扫描并连接所有名为 OpenWaifu 的设备）
 uv run openwaifud
 
 # 自定义端口和日志
@@ -49,7 +51,7 @@ uv run openwaifud --port 9000 --log-level DEBUG
 uv run openwaifud --help
 ```
 
-支持环境变量配置：`OPENWAIFUD_HTTP_HOST`、`OPENWAIFUD_HTTP_PORT`、`OPENWAIFUD_BLE_ADDRESS`、`OPENWAIFUD_BLE_DEVICE_NAME`、`OPENWAIFUD_LOG_LEVEL`。CLI 参数优先级高于环境变量。
+支持环境变量配置：`OPENWAIFUD_HTTP_HOST`、`OPENWAIFUD_HTTP_PORT`、`OPENWAIFUD_BLE_ADDRESS`、`OPENWAIFUD_BLE_DEVICE_NAME`、`OPENWAIFUD_LOG_LEVEL`、`OPENWAIFUD_ASR_MODEL`、`OPENWAIFUD_ASR_LANGUAGE`、`OPENWAIFUD_TTS_MODEL_DIR`、`OPENWAIFUD_TTS_VOICE`、`OPENWAIFUD_TTS_SPEED`。CLI 参数优先级高于环境变量。
 
 ## HTTP API 文档
 
@@ -215,9 +217,47 @@ python3 tools/mock_agent.py --status error --task "加载用户资料"
 | 设备广播名 | `OpenWaifu` |
 | Service | `0000fd50-0000-1000-0880-00805f9b34fb` |
 | Write 特征 | `00000001-0000-1001-8001-00805f9b07d0` |
+| Notify 特征 | `00000002-0000-1001-8001-00805f9b07d0` |
 | 编码 | UTF-8，单条命令最大 240 字节（超长按字符边界截断） |
 
-> 未配置 `--ble-address` 时，守护进程会按设备名 `OpenWaifu`（可用 `OPENWAIFUD_BLE_DEVICE_NAME` 覆盖）自动扫描连接，这在 macOS（地址为随机 UUID）上尤其方便。
+> 未配置 `--ble-address` 时，守护进程会持续扫描设备名 `OpenWaifu`（可用 `OPENWAIFUD_BLE_DEVICE_NAME` 覆盖），新设备出现后会立即尝试连接。扫描异常退出时会自动重启。每台设备拥有独立的写队列、重连任务和音频流；Agent 状态广播到全部已连接设备，语音回复只返回发起录音的设备。指定 `--ble-address` 时仍只连接该设备。
+
+### 唤醒录音与 ASR
+
+固件识别到“你好涂鸦”后，通过 Notify 特征发送二进制 PCM 音频。音频包使用
+`OWA` 魔数，通过开始帧、带序号的数据帧和结束帧组成一次录音。OpenWaifuD 会校验
+流 ID、数据帧序号和最终 PCM 长度；存在丢包或长度不一致时丢弃该次录音，不送入 ASR。
+
+完整录音由 `faster-whisper` 在本地 CPU 上以 INT8 模式识别，默认模型为 `medium`，
+默认语言为中文。守护进程启动时会加载并预热模型，避免第一次真实录音承担推理初始化开销；
+若本机没有模型缓存，会在启动阶段自动下载。
+
+```bash
+# 可选：使用更小、更快的模型（识别准确率会下降）
+OPENWAIFUD_ASR_MODEL=small uv run openwaifud --log-level DEBUG
+
+# 可选：修改识别语言
+OPENWAIFUD_ASR_LANGUAGE=en uv run openwaifud --log-level DEBUG
+```
+
+收到完整音频后，调试日志会输出录音长度及识别文本：
+
+```text
+BLE audio complete: stream=1, bytes=64000, duration=2.00s
+ASR recognized: "查看当前任务状态"
+```
+
+识别文本随后交给内置 Agent 的 `ChatService`。Agent 回复由本地 `kokoro-onnx`
+中文模型合成为 16 kHz、16-bit、单声道 PCM，再通过 BLE Write 特征回传设备播放。
+默认声音为 `zf_001`；中文模型、voices 和 vocab 配置首次使用时下载到
+`~/.cache/openwaifud/tts`，也可以预先下载并通过 `OPENWAIFUD_TTS_MODEL_DIR` 指定目录。
+
+```bash
+OPENWAIFUD_TTS_VOICE=zf_001 OPENWAIFUD_TTS_SPEED=1.0 uv run openwaifud
+```
+
+反向音频包使用 `OWT` 魔数，包括开始帧、带序号的 PCM 数据帧和结束帧。
+守护进程按音频实时速度发送，设备边接收边播放；播放期间暂停关键词检测，播放结束后恢复。
 
 ### 泳道 1 · 会话列表命令（全量快照）
 

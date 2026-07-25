@@ -2,31 +2,76 @@
 
 from __future__ import annotations
 
+from typing import TYPE_CHECKING
+
+import aiohttp_jinja2
 from aiohttp import web
 from loguru import logger
 from pydantic import ValidationError
 
-from openwaifud.models import ConversationContext, DetailUpdate, GlobalEvent, StatusUpdate
+from openwaifud.chat import ChatNotConfiguredError, ChatService, ChatUpstreamError
+from openwaifud.models import (
+    ChatConfig,
+    ChatRequest,
+    ConversationContext,
+    DetailUpdate,
+    GlobalEvent,
+    StatusUpdate,
+)
 from openwaifud.state.manager import StateManager
 
+if TYPE_CHECKING:
+    from openwaifud.ble.client import BLEClient
 
-def setup_routes(app: web.Application, state_manager: StateManager) -> None:
-    """Register all API routes."""
-    handlers = APIHandlers(state_manager)
+
+def setup_routes(
+    app: web.Application,
+    state_manager: StateManager,
+    ble_client: BLEClient | None = None,
+    chat_service: ChatService | None = None,
+) -> None:
+    """Register all API routes.
+
+    :param ble_client: BLE 客户端（可选）。提供时启用设备列表接口；
+        未提供时（如单元测试）相关接口返回空列表。
+    :param chat_service: 即时对话服务（可选）。未提供时对话相关接口返回 503。
+    """
+    handlers = APIHandlers(state_manager, ble_client, chat_service)
+    app.router.add_get("/", handlers.handle_index)
     app.router.add_post("/api/v1/status", handlers.handle_status)
     app.router.add_post("/api/v1/context", handlers.handle_context)
     app.router.add_post("/api/v1/event", handlers.handle_event)
     app.router.add_post("/api/v1/session/detail", handlers.handle_detail_post)
     app.router.add_get("/api/v1/session/{session_id}/detail", handlers.handle_detail_get)
+    app.router.add_get("/api/v1/chat/config", handlers.handle_chat_config_get)
+    app.router.add_put("/api/v1/chat/config", handlers.handle_chat_config_put)
+    app.router.add_post("/api/v1/chat", handlers.handle_chat)
     app.router.add_get("/api/v1/state", handlers.handle_state)
     app.router.add_get("/api/v1/health", handlers.handle_health)
+    app.router.add_get("/api/v1/devices", handlers.handle_devices)
 
 
 class APIHandlers:
     """HTTP request handlers."""
 
-    def __init__(self, state_manager: StateManager) -> None:
+    def __init__(
+        self,
+        state_manager: StateManager,
+        ble_client: BLEClient | None = None,
+        chat_service: ChatService | None = None,
+    ) -> None:
         self._state_manager = state_manager
+        self._ble_client = ble_client
+        self._chat_service = chat_service
+
+    async def handle_index(self, request: web.Request) -> web.Response:
+        """GET / - 网页端设备管理页（蓝牙设备列表）。"""
+        return aiohttp_jinja2.render_template("index.html", request, {})
+
+    async def handle_devices(self, request: web.Request) -> web.Response:
+        """GET /api/v1/devices - 已知硬件设备列表（含 BLE 连接状态）。"""
+        devices = self._ble_client.get_devices() if self._ble_client is not None else []
+        return web.json_response({"devices": devices})
 
     async def handle_status(self, request: web.Request) -> web.Response:
         """POST /api/v1/status - Receive agent status update."""
@@ -148,6 +193,70 @@ class APIHandlers:
                 status=404,
             )
         return web.json_response(detail.model_dump(mode="json"))
+
+    async def handle_chat_config_get(self, request: web.Request) -> web.Response:
+        """GET /api/v1/chat/config - 读取对话模型配置（api_key 不回显）。"""
+        if self._chat_service is None:
+            return web.json_response({"error": "对话服务未启用"}, status=503)
+        return web.json_response(self._chat_service.get_public_config())
+
+    async def handle_chat_config_put(self, request: web.Request) -> web.Response:
+        """PUT /api/v1/chat/config - 保存对话模型配置（网页端）。
+
+        空 api_key 表示保留已保存的 Key，便于只改 base_url / model。
+        """
+        if self._chat_service is None:
+            return web.json_response({"error": "对话服务未启用"}, status=503)
+        try:
+            data = await request.json()
+        except Exception:
+            return web.json_response(
+                {"error": "Invalid JSON body"},
+                status=400,
+            )
+
+        try:
+            cfg = ChatConfig(**data)
+        except ValidationError as e:
+            return web.json_response(
+                {"error": "Validation failed", "details": e.errors()},
+                status=422,
+            )
+
+        self._chat_service.save_config(cfg)
+        return web.json_response(
+            {"success": True, **self._chat_service.get_public_config()},
+        )
+
+    async def handle_chat(self, request: web.Request) -> web.Response:
+        """POST /api/v1/chat - 即时对话：单次提问，同步返回模型回复。"""
+        if self._chat_service is None:
+            return web.json_response({"error": "对话服务未启用"}, status=503)
+        try:
+            data = await request.json()
+        except Exception:
+            return web.json_response(
+                {"error": "Invalid JSON body"},
+                status=400,
+            )
+
+        try:
+            req = ChatRequest(**data)
+        except ValidationError as e:
+            return web.json_response(
+                {"error": "Validation failed", "details": e.errors()},
+                status=422,
+            )
+
+        try:
+            reply = await self._chat_service.chat(req.message)
+        except ChatNotConfiguredError as e:
+            return web.json_response({"error": str(e)}, status=503)
+        except ChatUpstreamError as e:
+            logger.warning(f"Chat upstream error: {e}")
+            return web.json_response({"error": str(e)}, status=502)
+
+        return web.json_response({"reply": reply})
 
     async def handle_state(self, request: web.Request) -> web.Response:
         """GET /api/v1/state - Get current daemon state."""
